@@ -1,11 +1,34 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
+import * as fs from 'node:fs';
+import * as nodePath from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { EventBus } from '../events/event-bus.js';
 import type { TaskManager } from '../pipeline/task-manager.js';
 import type { ReviewPipeline } from '../pipeline/review-pipeline.js';
 import type { SuggestionEngine } from '../suggestions/suggestion-engine.js';
 import type { MetricsCollector } from '../telemetry/metrics-collector.js';
 import type { AuditLog } from '../telemetry/audit-log.js';
+
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html',
+  '.js': 'application/javascript',
+  '.css': 'text/css',
+  '.json': 'application/json',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+};
+
+function resolveWebDir(): string | null {
+  try {
+    // Resolve from daemon package: ../../web/dist
+    const thisDir = nodePath.dirname(fileURLToPath(import.meta.url));
+    const candidate = nodePath.resolve(thisDir, '..', '..', '..', 'web', 'dist');
+    if (fs.existsSync(nodePath.join(candidate, 'index.html'))) return candidate;
+  } catch { /* ignore */ }
+  return null;
+}
 
 export interface ApiServerOptions {
   port: number;
@@ -229,6 +252,23 @@ export class ApiServer {
         return this.json(res, 201, result);
       } catch {
         return this.json(res, 404, { error: 'suggestion not found' });
+      }
+    }
+
+    // ── Static files (Web UI) ──
+    const webDir = resolveWebDir();
+    if (webDir) {
+      let filePath = nodePath.join(webDir, url === '/' ? 'index.html' : url);
+      // SPA fallback: non-API, non-file paths → index.html
+      if (!fs.existsSync(filePath)) {
+        filePath = nodePath.join(webDir, 'index.html');
+      }
+      if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+        const ext = nodePath.extname(filePath);
+        const mime = MIME_TYPES[ext] || 'application/octet-stream';
+        res.writeHead(200, { 'Content-Type': mime });
+        fs.createReadStream(filePath).pipe(res);
+        return;
       }
     }
 

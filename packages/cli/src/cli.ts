@@ -43,6 +43,14 @@ export function createProgram(): Command {
     });
 
   program
+    .command('open')
+    .description('Open the AgentOS web console in browser')
+    .action(async () => {
+      const { openConsole } = await import('./commands/open.js');
+      await openConsole();
+    });
+
+  program
     .command('list')
     .description('List all registered AgentOS projects')
     .action(async () => {

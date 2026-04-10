@@ -7,7 +7,9 @@ interface UseWebSocketResult {
 }
 
 export function useWebSocket(url?: string): UseWebSocketResult {
-  const wsUrl = url || `ws://${window.location.hostname}:3382/ws`;
+  const wsUrl = url || (window.location.port === '3383'
+    ? `ws://${window.location.hostname}:3382/ws`
+    : `ws://${window.location.host}/ws`);
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const [lastMessage, setLastMessage] = useState<unknown | null>(null);
   const wsRef = useRef<WebSocket | null>(null);

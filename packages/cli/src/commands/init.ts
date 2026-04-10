@@ -134,6 +134,62 @@ export async function initProject(targetDir: string): Promise<void> {
   console.log('\n.agentos/ created successfully.');
   console.log(`  Ollama:     ${report.environment.ollama}`);
   console.log(`  CLI Agents: ${report.environment.cli_agents}`);
+  // Write usage guide
+  const guideContent = `# AgentOS
+
+Project-level intelligent coordination system.
+
+## Quick Start
+
+\`\`\`bash
+agentos start          # Start the daemon
+agentos open           # Open the web console in browser
+\`\`\`
+
+## Commands
+
+| Command          | Description                    |
+|------------------|--------------------------------|
+| \`agentos init\`   | Initialize AgentOS (done)      |
+| \`agentos start\`  | Start the daemon               |
+| \`agentos open\`   | Open the web console           |
+| \`agentos status\` | Show daemon status             |
+| \`agentos stop\`   | Stop the daemon                |
+| \`agentos list\`   | List all registered projects   |
+
+## How It Works
+
+1. **Start** \u2014 The daemon begins watching your project files and git activity
+2. **Ask** \u2014 Type a request in the console (e.g. "refactor the auth module")
+3. **Review** \u2014 Agent A writes code, Agent B writes tests, Agent C reviews
+4. **Accept** \u2014 Review the diff, then accept or discard
+
+The system continuously observes your project in the background.
+Suggestions appear in the inbox when risks or opportunities are detected.
+
+## Configuration
+
+Settings are stored in \`.agentos/config.json\`.
+Edit via the web console Settings panel or:
+
+\`\`\`bash
+curl -X PUT http://localhost:${config.port}/api/settings \\
+  -H "Content-Type: application/json" \\
+  -d '{"auto_execute": false}'
+\`\`\`
+
+## Environment
+
+- Daemon API: \`http://localhost:${config.port}\`
+- WebSocket: \`ws://localhost:${config.port}/ws\`
+- Data: \`.agentos/\` (events, state, suggestions)
+`;
+
+  const guidePath = path.join(targetDir, 'AGENTOS.md');
+  if (!fs.existsSync(guidePath)) {
+    fs.writeFileSync(guidePath, guideContent);
+  }
+
   // Register in global project list
   try {
     const { registerProject } = await import('./list.js');
@@ -141,4 +197,5 @@ export async function initProject(targetDir: string): Promise<void> {
   } catch { /* ignore if list module not available */ }
 
   console.log(`\nRun 'agentos start' to launch the daemon.`);
+  console.log(`Run 'agentos open' to open the web console.`);
 }

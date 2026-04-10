@@ -1,6 +1,9 @@
 import { useState, useCallback } from 'react';
 
-const BASE = `http://${window.location.hostname}:3382`;
+// When served by daemon directly, use same origin; when vite dev, use daemon port
+const BASE = window.location.port === '3383'
+  ? `http://${window.location.hostname}:3382`
+  : '';
 
 export function useApi() {
   const get = useCallback(async <T = unknown>(path: string): Promise<T> => {
