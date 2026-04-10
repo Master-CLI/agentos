@@ -9,40 +9,31 @@ export interface CliAgentConfig {
   timeoutMs?: number;
 }
 
+const SYSTEM_PREFIX =
+  `You are a pure text-output assistant. You MUST NOT request permissions, ` +
+  `create files, modify files, or use any tools. You MUST NOT say "I need write access" ` +
+  `or ask the user to approve anything. Simply output code in markdown fenced code blocks ` +
+  `with the filename as a comment on the first line. Example:\n` +
+  "```typescript\n// src/hello.ts\nexport function hello() { return 'world'; }\n```\n\n";
+
 const PROVIDER_CONFIGS: Record<string, Omit<CliAgentConfig, 'name'>> = {
   'claude-code': {
     command: 'claude',
-    buildArgs: (task) => [
-      '-p',
-      `You are a code generator. Do NOT create, write, or modify any files. ` +
-      `Do NOT use any tools. Only output the code or analysis as plain text in your response.\n\n${task.prompt}`,
-      '--output-format', 'json',
-      '--allowedTools', '',
-    ],
+    buildArgs: (task) => ['-p', SYSTEM_PREFIX + task.prompt],
     parseOutput: (stdout) => {
-      try {
-        const parsed = JSON.parse(stdout);
-        const text = parsed.result ?? parsed.content ?? stdout;
-        return { output: String(text), structured: parsed };
-      } catch {
-        return { output: stdout };
-      }
+      // claude -p outputs raw text (or JSON if --output-format json)
+      // We use raw text mode for reliability
+      return { output: stdout };
     },
   },
   codex: {
     command: 'codex',
-    buildArgs: (task) => [
-      '-q',
-      `You are a code generator. Only output code or analysis as text. Do not modify files.\n\n${task.prompt}`,
-    ],
+    buildArgs: (task) => ['-q', SYSTEM_PREFIX + task.prompt],
     parseOutput: (stdout) => ({ output: stdout }),
   },
   gemini: {
     command: 'gemini',
-    buildArgs: (task) => [
-      '-p',
-      `You are a code reviewer. Only output your analysis as text.\n\n${task.prompt}`,
-    ],
+    buildArgs: (task) => ['-p', SYSTEM_PREFIX + task.prompt],
     parseOutput: (stdout) => ({ output: stdout }),
   },
 };
