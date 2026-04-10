@@ -1,0 +1,21 @@
+{
+  "name": "@agentos/cli",
+  "version": "0.1.0",
+  "description": "AgentOS command-line interface",
+  "bin": {
+    "agentos": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "@agentos/daemon": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

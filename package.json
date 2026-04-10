@@ -1,0 +1,19 @@
+{
+  "name": "agentos",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Project-level intelligent coordination system",
+  "workspaces": [
+    "packages/cli",
+    "packages/daemon",
+    "packages/web"
+  ],
+  "scripts": {
+    "build": "npm run build -w packages/daemon && npm run build -w packages/cli && npm run build -w packages/web",
+    "test": "npm run test -w packages/daemon && npm run test -w packages/cli",
+    "clean": "rimraf packages/*/dist"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
