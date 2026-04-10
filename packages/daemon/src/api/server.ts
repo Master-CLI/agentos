@@ -1,10 +1,14 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { EventBus } from '../events/event-bus.js';
+import type { TaskManager } from '../pipeline/task-manager.js';
+import type { ReviewPipeline } from '../pipeline/review-pipeline.js';
 
 export interface ApiServerOptions {
   port: number;
   eventBus: EventBus;
+  taskManager?: TaskManager;
+  reviewPipeline?: ReviewPipeline;
 }
 
 export class ApiServer {
@@ -12,10 +16,14 @@ export class ApiServer {
   private wss: WebSocketServer;
   private clients: Set<WebSocket> = new Set();
   private eventBus: EventBus;
+  private taskManager?: TaskManager;
+  private reviewPipeline?: ReviewPipeline;
   private unsubscribe?: () => void;
 
   constructor(private opts: ApiServerOptions) {
     this.eventBus = opts.eventBus;
+    this.taskManager = opts.taskManager;
+    this.reviewPipeline = opts.reviewPipeline;
 
     this.httpServer = createServer((req, res) => this.handleHttp(req, res));
     this.wss = new WebSocketServer({ server: this.httpServer });
@@ -26,6 +34,9 @@ export class ApiServer {
       ws.on('close', () => this.clients.delete(ws));
     });
   }
+
+  setTaskManager(tm: TaskManager): void { this.taskManager = tm; }
+  setReviewPipeline(rp: ReviewPipeline): void { this.reviewPipeline = rp; }
 
   start(): Promise<void> {
     return new Promise((resolve) => {
@@ -38,6 +49,17 @@ export class ApiServer {
             }
           }
         });
+
+        // Forward task status changes over WebSocket
+        this.taskManager?.events.on('task_status_changed', (data) => {
+          const msg = JSON.stringify({ type: 'task_status_changed', ...data });
+          for (const client of this.clients) {
+            if (client.readyState === WebSocket.OPEN) {
+              client.send(msg);
+            }
+          }
+        });
+
         resolve();
       });
     });
@@ -63,14 +85,91 @@ export class ApiServer {
     return this.opts.port;
   }
 
-  private handleHttp(req: IncomingMessage, res: ServerResponse): void {
-    if (req.method === 'GET' && req.url === '/health') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
-      return;
+  private async handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const url = req.url ?? '';
+    const method = req.method ?? '';
+
+    // ── Health ──
+    if (method === 'GET' && url === '/health') {
+      return this.json(res, 200, { status: 'ok', timestamp: new Date().toISOString() });
     }
 
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'not found' }));
+    // ── POST /api/dialog ──
+    if (method === 'POST' && url === '/api/dialog') {
+      if (!this.taskManager) return this.json(res, 503, { error: 'task manager not ready' });
+      const body = await this.readBody(req);
+      const { prompt } = JSON.parse(body);
+      if (!prompt) return this.json(res, 400, { error: 'prompt is required' });
+
+      const task = this.taskManager.create({
+        prompt,
+        origin: 'user',
+        projectId: 'default',
+      });
+
+      // Start pipeline execution in background (non-blocking)
+      if (this.reviewPipeline) {
+        this.reviewPipeline.execute(task.id).catch(() => {
+          // Pipeline errors are tracked in the task itself
+        });
+      }
+
+      return this.json(res, 201, { task_id: task.id });
+    }
+
+    // ── GET /api/tasks ──
+    if (method === 'GET' && url === '/api/tasks') {
+      if (!this.taskManager) return this.json(res, 503, { error: 'task manager not ready' });
+      return this.json(res, 200, this.taskManager.list());
+    }
+
+    // ── GET /api/tasks/:id ──
+    const taskMatch = url.match(/^\/api\/tasks\/([^/]+)$/);
+    if (method === 'GET' && taskMatch) {
+      if (!this.taskManager) return this.json(res, 503, { error: 'task manager not ready' });
+      const task = this.taskManager.get(taskMatch[1]);
+      if (!task) return this.json(res, 404, { error: 'task not found' });
+      return this.json(res, 200, task);
+    }
+
+    // ── POST /api/tasks/:id/accept ──
+    const acceptMatch = url.match(/^\/api\/tasks\/([^/]+)\/accept$/);
+    if (method === 'POST' && acceptMatch) {
+      if (!this.taskManager) return this.json(res, 503, { error: 'task manager not ready' });
+      try {
+        const task = this.taskManager.updateStatus(acceptMatch[1], 'completed');
+        return this.json(res, 200, task);
+      } catch {
+        return this.json(res, 404, { error: 'task not found' });
+      }
+    }
+
+    // ── POST /api/tasks/:id/discard ──
+    const discardMatch = url.match(/^\/api\/tasks\/([^/]+)\/discard$/);
+    if (method === 'POST' && discardMatch) {
+      if (!this.taskManager) return this.json(res, 503, { error: 'task manager not ready' });
+      try {
+        const task = this.taskManager.updateStatus(discardMatch[1], 'cancelled');
+        return this.json(res, 200, task);
+      } catch {
+        return this.json(res, 404, { error: 'task not found' });
+      }
+    }
+
+    return this.json(res, 404, { error: 'not found' });
+  }
+
+  private json(res: ServerResponse, status: number, data: unknown): void {
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(data));
+  }
+
+  private readBody(req: IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => resolve(body));
+      req.on('error', reject);
+    });
   }
 }
