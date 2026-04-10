@@ -226,9 +226,33 @@ export class ReviewPipeline {
     if (structured && Array.isArray((structured as any).files)) {
       return (structured as any).files;
     }
-    // Fallback: return a single synthetic diff
+
+    // Try to extract fenced code blocks with file names
+    const files: FileDiff[] = [];
+    const blockRegex = /```(?:\w+)?\s*\n([\s\S]*?)```/g;
+    const fileHintRegex = /(?:\/\/|#)\s*(?:file:\s*)?(\S+\.\w+)/;
+    let match;
+    while ((match = blockRegex.exec(output)) !== null) {
+      const code = match[1].trim();
+      const lines = code.split('\n');
+      // Try to find a file name hint in the line before the code block
+      const beforeBlock = output.slice(Math.max(0, match.index - 200), match.index);
+      const fileMatch = beforeBlock.match(/`([^`]+\.\w+)`/) || beforeBlock.match(/(\S+\.\w+)\s*[:：]?\s*$/) || lines[0].match(fileHintRegex);
+      const fileName = fileMatch ? fileMatch[1] : `file${files.length + 1}.ts`;
+
+      files.push({
+        path: fileName,
+        additions: lines.length,
+        deletions: 0,
+        content: code,
+      });
+    }
+
+    if (files.length > 0) return files;
+
+    // Final fallback: treat entire output as a single response
     return [{
-      path: 'generated.ts',
+      path: 'response.md',
       additions: output.split('\n').length,
       deletions: 0,
       content: output,

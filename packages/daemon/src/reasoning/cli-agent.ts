@@ -12,11 +12,16 @@ export interface CliAgentConfig {
 const PROVIDER_CONFIGS: Record<string, Omit<CliAgentConfig, 'name'>> = {
   'claude-code': {
     command: 'claude',
-    buildArgs: (task) => ['-p', task.prompt, '--output-format', 'json'],
+    buildArgs: (task) => [
+      '-p',
+      `You are a code generator. Do NOT create, write, or modify any files. ` +
+      `Do NOT use any tools. Only output the code or analysis as plain text in your response.\n\n${task.prompt}`,
+      '--output-format', 'json',
+      '--allowedTools', '',
+    ],
     parseOutput: (stdout) => {
       try {
         const parsed = JSON.parse(stdout);
-        // Claude Code JSON output has a result field
         const text = parsed.result ?? parsed.content ?? stdout;
         return { output: String(text), structured: parsed };
       } catch {
@@ -26,12 +31,18 @@ const PROVIDER_CONFIGS: Record<string, Omit<CliAgentConfig, 'name'>> = {
   },
   codex: {
     command: 'codex',
-    buildArgs: (task) => ['-q', task.prompt],
+    buildArgs: (task) => [
+      '-q',
+      `You are a code generator. Only output code or analysis as text. Do not modify files.\n\n${task.prompt}`,
+    ],
     parseOutput: (stdout) => ({ output: stdout }),
   },
   gemini: {
     command: 'gemini',
-    buildArgs: (task) => ['-p', task.prompt],
+    buildArgs: (task) => [
+      '-p',
+      `You are a code reviewer. Only output your analysis as text.\n\n${task.prompt}`,
+    ],
     parseOutput: (stdout) => ({ output: stdout }),
   },
 };
