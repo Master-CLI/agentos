@@ -36,6 +36,7 @@ interface TaskFull {
     reviews: ReviewReport[];
     consensus: string;
     fix_attempts: number;
+    error?: string;
   };
 }
 
@@ -84,6 +85,14 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
           </div>
         )}
       </div>
+
+      {/* Pipeline Error */}
+      {p.error && (
+        <div className="card" style={{ borderColor: 'var(--red)' }}>
+          <h2 style={{ color: 'var(--red)' }}>Pipeline Error</h2>
+          <p style={{ fontSize: 13 }}>{p.error}</p>
+        </div>
+      )}
 
       {/* Pipeline Status */}
       <div className="card">

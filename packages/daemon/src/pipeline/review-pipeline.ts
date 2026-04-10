@@ -9,6 +9,16 @@ const MAX_FIX_ATTEMPTS = 2;
 export interface ReviewPipelineOptions {
   router: ReasoningRouter;
   taskManager: TaskManager;
+  stageTimeoutMs?: number;
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    ),
+  ]);
 }
 
 /**
@@ -19,9 +29,12 @@ export class ReviewPipeline {
   private router: ReasoningRouter;
   private taskManager: TaskManager;
 
+  private stageTimeoutMs: number;
+
   constructor(opts: ReviewPipelineOptions) {
     this.router = opts.router;
     this.taskManager = opts.taskManager;
+    this.stageTimeoutMs = opts.stageTimeoutMs ?? 120000; // 2 min per stage
   }
 
   /**
@@ -32,6 +45,20 @@ export class ReviewPipeline {
     const task = this.taskManager.get(taskId);
     if (!task) throw new Error(`Task ${taskId} not found`);
 
+    try {
+      return await this.executeStages(taskId, task);
+    } catch (err) {
+      // On any failure, mark error in pipeline and move to awaiting_user
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      this.taskManager.updatePipeline(taskId, (p) => {
+        (p as any).error = errorMsg;
+      });
+      this.taskManager.updateStatus(taskId, 'awaiting_user');
+      return this.taskManager.get(taskId)!;
+    }
+  }
+
+  private async executeStages(taskId: string, task: CodeTask): Promise<CodeTask> {
     // Pick 3 distinct providers for implement, test, review
     const providers = this.allocateProviders(task.change_level);
 
@@ -42,11 +69,15 @@ export class ReviewPipeline {
       p.implementation.started_at = new Date().toISOString();
     });
 
-    const implResult = await this.router.execute({
-      type: 'architect',
-      prompt: `Implement the following request. Return a JSON object with a "files" array, each with "path", "additions", "deletions", "content" fields.\n\nRequest: ${task.prompt}`,
-      context: `Project: ${task.context.project_id}, Modules: ${task.context.related_modules.join(', ')}`,
-    });
+    const implResult = await withTimeout(
+      this.router.execute({
+        type: 'architect',
+        prompt: `Implement the following request. Return a JSON object with a "files" array, each with "path", "additions", "deletions", "content" fields.\n\nRequest: ${task.prompt}`,
+        context: `Project: ${task.context.project_id}, Modules: ${task.context.related_modules.join(', ')}`,
+      }),
+      this.stageTimeoutMs,
+      'Implementation',
+    );
 
     const diffs = this.parseDiffs(implResult.output, implResult.structured);
     const level = classifyChangeLevel(diffs, task.context.related_modules.length);
@@ -67,10 +98,14 @@ export class ReviewPipeline {
       p.testing.provider = providers.tester;
     });
 
-    const testResult = await this.router.execute({
-      type: 'architect',
-      prompt: `Write tests for the following code changes. Return a JSON object with "test_files" (array of filenames) and "passed" (boolean), "total" and "failed" (numbers).\n\nChanges:\n${JSON.stringify(diffs)}`,
-    });
+    const testResult = await withTimeout(
+      this.router.execute({
+        type: 'architect',
+        prompt: `Write tests for the following code changes. Return a JSON object with "test_files" (array of filenames) and "passed" (boolean), "total" and "failed" (numbers).\n\nChanges:\n${JSON.stringify(diffs)}`,
+      }),
+      this.stageTimeoutMs,
+      'Testing',
+    );
 
     const testData = this.parseTestResult(testResult.output, testResult.structured);
     this.taskManager.updatePipeline(taskId, (p) => {
@@ -88,10 +123,14 @@ export class ReviewPipeline {
     }
 
     for (const reviewer of reviewers) {
-      const reviewResult = await this.router.execute({
-        type: 'diagnose',
-        prompt: `Review the following code changes for issues. Return JSON with "verdict" (approve/request_changes/reject) and "concerns" array (each with file, severity, category, message).\n\nChanges:\n${JSON.stringify(diffs)}`,
-      });
+      const reviewResult = await withTimeout(
+        this.router.execute({
+          type: 'diagnose',
+          prompt: `Review the following code changes for issues. Return JSON with "verdict" (approve/request_changes/reject) and "concerns" array (each with file, severity, category, message).\n\nChanges:\n${JSON.stringify(diffs)}`,
+        }),
+        this.stageTimeoutMs,
+        'Review',
+      );
 
       const report = this.parseReviewReport(reviewer, reviewResult.output, reviewResult.structured);
       this.taskManager.updatePipeline(taskId, (p) => {

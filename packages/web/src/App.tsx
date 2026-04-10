@@ -38,7 +38,7 @@ export default function App() {
       </nav>
 
       <main className="main">
-        <DialogInput />
+        <DialogInput onTaskCreated={(id) => { setView('tasks'); setSelectedTaskId(id); }} />
 
         {view === 'tasks' && !selectedTaskId && (
           <TaskPanel onSelect={(id) => setSelectedTaskId(id)} />

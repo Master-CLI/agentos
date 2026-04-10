@@ -1,18 +1,28 @@
 import { useState } from 'react';
 import { useApi } from '../hooks/useApi';
 
-export function DialogInput() {
+interface DialogInputProps {
+  onTaskCreated?: (taskId: string) => void;
+}
+
+export function DialogInput({ onTaskCreated }: DialogInputProps) {
   const [prompt, setPrompt] = useState('');
   const [loading, setLoading] = useState(false);
+  const [feedback, setFeedback] = useState<string | null>(null);
   const api = useApi();
 
   const submit = async () => {
     if (!prompt.trim() || loading) return;
     setLoading(true);
+    setFeedback(null);
     try {
-      await api.post('/api/dialog', { prompt: prompt.trim() });
+      const res = await api.post<{ task_id: string }>('/api/dialog', { prompt: prompt.trim() });
       setPrompt('');
+      setFeedback(`Task created (${res.task_id.slice(-6)})`);
+      onTaskCreated?.(res.task_id);
+      setTimeout(() => setFeedback(null), 3000);
     } catch (err) {
+      setFeedback('Failed to create task');
       console.error('Dialog error:', err);
     } finally {
       setLoading(false);
@@ -30,9 +40,18 @@ export function DialogInput() {
           disabled={loading}
         />
         <button onClick={submit} disabled={loading || !prompt.trim()}>
-          {loading ? '...' : 'Send'}
+          {loading ? 'Sending...' : 'Send'}
         </button>
       </div>
+      {feedback && (
+        <div style={{
+          marginTop: 8,
+          fontSize: 13,
+          color: feedback.startsWith('Failed') ? 'var(--red)' : 'var(--green)',
+        }}>
+          {feedback}
+        </div>
+      )}
     </div>
   );
 }
