@@ -2,6 +2,7 @@
   "name": "@agentos/cli",
   "version": "0.1.0",
   "description": "AgentOS command-line interface",
+  "type": "module",
   "bin": {
     "agentos": "./dist/index.js"
   },

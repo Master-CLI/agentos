@@ -24,9 +24,7 @@ export async function startDaemon(port: string | number): Promise<void> {
     }
   }
 
-  // Dynamic import — resolved at runtime via npm workspace link
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { Daemon } = require('@agentos/daemon');
+  const { Daemon } = await import('@agentos/daemon');
 
   const daemon = new Daemon({
     projectDir,

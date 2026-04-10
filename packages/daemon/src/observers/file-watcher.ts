@@ -56,13 +56,13 @@ export class FileWatcher implements Observer {
     this.watcher.on('unlink', (filePath) => this.enqueue('file_deleted', filePath));
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.batchTimer) {
       clearTimeout(this.batchTimer);
       this.batchTimer = null;
     }
     this.flush();
-    this.watcher?.close();
+    await this.watcher?.close();
     this.watcher = null;
   }
 

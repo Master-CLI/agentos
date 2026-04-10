@@ -7,6 +7,7 @@ import { TaskManager } from '../src/pipeline/task-manager.js';
 import { MetricsCollector } from '../src/telemetry/metrics-collector.js';
 import { AuditLog } from '../src/telemetry/audit-log.js';
 import { SuggestionEngine } from '../src/suggestions/suggestion-engine.js';
+import { safeRmSync } from './helpers.js';
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'agentos-p5-'));
@@ -51,7 +52,7 @@ describe('Phase 5 — 自观测', () => {
 
   afterAll(async () => {
     await daemon.stop();
-    fs.rmSync(projectDir, { recursive: true, force: true });
+    safeRmSync(projectDir);
   });
 
   it('GET /api/telemetry/metrics → 返回 tasks_total, avg_latency, provider_usage', async () => {
@@ -97,7 +98,7 @@ describe('Phase 5 — 设置', () => {
 
   afterAll(async () => {
     await daemon.stop();
-    fs.rmSync(projectDir, { recursive: true, force: true });
+    safeRmSync(projectDir);
   });
 
   it('PUT /api/settings { watch_paths: [...] } → config.json 更新', async () => {
@@ -152,7 +153,7 @@ describe('Phase 5 — 审计日志', () => {
 
   afterAll(async () => {
     await daemon.stop();
-    fs.rmSync(projectDir, { recursive: true, force: true });
+    safeRmSync(projectDir);
   });
 
   it('GET /api/audit → 返回所有操作记录', async () => {
@@ -200,7 +201,7 @@ describe('Phase 5 — 多项目', () => {
 
     store1.close();
     store2.close();
-    fs.rmSync(dir1, { recursive: true, force: true });
-    fs.rmSync(dir2, { recursive: true, force: true });
+    safeRmSync(dir1);
+    safeRmSync(dir2);
   });
 });

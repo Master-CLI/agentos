@@ -6,6 +6,7 @@ import { EventStore } from '../src/events/event-store.js';
 import { EventBus } from '../src/events/event-bus.js';
 import { Daemon } from '../src/daemon.js';
 import WebSocket from 'ws';
+import { safeRmSync } from './helpers.js';
 
 function tmpDir(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentos-test-'));
@@ -57,7 +58,7 @@ describe('Phase 0 — SQLite 事件存储', () => {
 
   afterAll(() => {
     store.close();
-    fs.rmSync(dir, { recursive: true, force: true });
+    safeRmSync(dir);
   });
 
   it('写入 3 条事件后 events.db 文件大小 > 0', () => {
@@ -106,7 +107,7 @@ describe('Phase 0 — 守护进程生命周期', () => {
 
   afterAll(async () => {
     await daemon.stop();
-    fs.rmSync(projectDir, { recursive: true, force: true });
+    safeRmSync(projectDir);
   });
 
   it('启动后 PID 文件可读', () => {
@@ -139,7 +140,7 @@ describe('Phase 0 — WebSocket 连通', () => {
 
   afterAll(async () => {
     await daemon.stop();
-    fs.rmSync(projectDir, { recursive: true, force: true });
+    safeRmSync(projectDir);
   });
 
   it('WebSocket 可连接并收到 connected 握手消息', async () => {

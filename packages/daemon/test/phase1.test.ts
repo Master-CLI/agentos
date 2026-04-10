@@ -9,6 +9,7 @@ import { GitObserver } from '../src/observers/git-observer.js';
 import { Daemon } from '../src/daemon.js';
 import type { ProjectEvent } from '../src/events/types.js';
 import WebSocket from 'ws';
+import { safeRmSync } from './helpers.js';
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'agentos-p1-'));
@@ -61,7 +62,7 @@ describe('Phase 1 — FileWatcher', () => {
 
   afterAll(() => {
     watcher.stop();
-    fs.rmSync(dir, { recursive: true, force: true });
+    safeRmSync(dir);
   });
 
   it('创建文件 → file_created 事件', async () => {
@@ -135,7 +136,7 @@ describe('Phase 1 — 事件去噪', () => {
 
   afterAll(() => {
     watcher.stop();
-    fs.rmSync(dir, { recursive: true, force: true });
+    safeRmSync(dir);
   });
 
   it('node_modules/ 下创建文件 → 无事件', async () => {
@@ -201,7 +202,7 @@ describe('Phase 1 — GitObserver', () => {
 
   afterAll(() => {
     observer.stop();
-    fs.rmSync(dir, { recursive: true, force: true });
+    safeRmSync(dir);
   });
 
   it('git commit → commit_pushed 事件，payload 含 hash/message/author/files_changed', async () => {
@@ -246,7 +247,7 @@ describe('Phase 1 — WebSocket 事件推送', () => {
 
   afterAll(async () => {
     await daemon.stop();
-    fs.rmSync(projectDir, { recursive: true, force: true });
+    safeRmSync(projectDir);
   });
 
   it('WS 客户端连接后，发布事件 → 客户端收到消息', async () => {
@@ -303,7 +304,7 @@ describe('Phase 1 — 冷启动零知识报告', () => {
     expect(report.dependencies).toBe(2);
     expect(report.git_summary).toBeTruthy();
 
-    fs.rmSync(dir, { recursive: true, force: true });
+    safeRmSync(dir);
   });
 
   it('含 .git 的目录 init → 报告包含 commit 数', async () => {
@@ -323,7 +324,7 @@ describe('Phase 1 — 冷启动零知识报告', () => {
     expect(report.git_summary.available).toBe(true);
     expect(report.git_summary.commit_count).toBeGreaterThanOrEqual(1);
 
-    fs.rmSync(dir, { recursive: true, force: true });
+    safeRmSync(dir);
   });
 
   it('报告为合法 JSON 且含 structure / dependencies / git_summary', async () => {
@@ -337,6 +338,6 @@ describe('Phase 1 — 冷启动零知识报告', () => {
     expect(report).toHaveProperty('dependencies');
     expect(report).toHaveProperty('git_summary');
 
-    fs.rmSync(dir, { recursive: true, force: true });
+    safeRmSync(dir);
   });
 });

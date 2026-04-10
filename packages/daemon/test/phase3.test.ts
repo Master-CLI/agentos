@@ -9,6 +9,7 @@ import { ReasoningRouter } from '../src/reasoning/router.js';
 import { Daemon } from '../src/daemon.js';
 import type { ReasoningProvider, ReasoningResult, ReasoningTask } from '../src/reasoning/types.js';
 import type { FileDiff } from '../src/pipeline/types.js';
+import { safeRmSync } from './helpers.js';
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'agentos-p3-'));
@@ -264,7 +265,7 @@ describe('Phase 3 — REST API', () => {
 
   afterAll(async () => {
     await daemon.stop();
-    fs.rmSync(projectDir, { recursive: true, force: true });
+    safeRmSync(projectDir);
   });
 
   it('POST /api/dialog → 201 + task_id', async () => {

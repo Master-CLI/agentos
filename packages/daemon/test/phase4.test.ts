@@ -8,6 +8,7 @@ import { ConfidenceCalibrator } from '../src/trust/confidence-calibrator.js';
 import { DampingController } from '../src/trust/damping.js';
 import { FeedbackTracker } from '../src/trust/feedback-tracker.js';
 import { Daemon } from '../src/daemon.js';
+import { safeRmSync } from './helpers.js';
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'agentos-p4-'));
@@ -204,7 +205,7 @@ describe('Phase 4 — Suggestion API', () => {
 
   afterAll(async () => {
     await daemon.stop();
-    fs.rmSync(projectDir, { recursive: true, force: true });
+    safeRmSync(projectDir);
   });
 
   it('GET /api/suggestions → 返回数组', async () => {

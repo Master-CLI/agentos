@@ -1,4 +1,4 @@
-import simpleGit, { type SimpleGit, type LogResult } from 'simple-git';
+import { simpleGit, type SimpleGit, type LogResult } from 'simple-git';
 import type { EventBus } from '../events/event-bus.js';
 import type { ProjectEvent } from '../events/types.js';
 import type { Observer } from './types.js';

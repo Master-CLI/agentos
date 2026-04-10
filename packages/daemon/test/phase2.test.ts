@@ -10,6 +10,7 @@ import { detectModules } from '../src/state/module-detector.js';
 import { EventStore } from '../src/events/event-store.js';
 import { EventBus } from '../src/events/event-bus.js';
 import type { ReasoningProvider } from '../src/reasoning/types.js';
+import { safeRmSync } from './helpers.js';
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'agentos-p2-'));
@@ -167,7 +168,7 @@ describe('Phase 2 — 状态快照', () => {
   afterAll(() => {
     engine.stop();
     store.close();
-    fs.rmSync(dir, { recursive: true, force: true });
+    safeRmSync(dir);
   });
 
   it('写入 10 条事件 → 快照 version ≥ 1', () => {
@@ -233,7 +234,7 @@ describe('Phase 2 — 模块识别', () => {
 
     const modules = detectModules(dir);
     expect(modules.length).toBeGreaterThanOrEqual(2);
-    fs.rmSync(dir, { recursive: true, force: true });
+    safeRmSync(dir);
   });
 
   it('每个模块包含 name, path, dependencies', () => {
@@ -253,6 +254,6 @@ describe('Phase 2 — 模块识别', () => {
     expect(mod).toBeTruthy();
     expect(mod!.path).toContain('api');
     expect(mod!.dependencies).toContain('express');
-    fs.rmSync(dir, { recursive: true, force: true });
+    safeRmSync(dir);
   });
 });
