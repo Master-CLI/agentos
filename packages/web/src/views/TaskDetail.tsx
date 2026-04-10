@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useApi } from '../hooks/useApi';
+import { AgentTerminal } from './AgentTerminal';
 
 interface ReviewConcern {
   file: string;
@@ -85,6 +86,11 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
           </div>
         )}
       </div>
+
+      {/* Agent Terminal — live output */}
+      {(task.status === 'implementing' || task.status === 'testing' || task.status === 'reviewing') && (
+        <AgentTerminal taskId={taskId} />
+      )}
 
       {/* Pipeline Error */}
       {p.error && (

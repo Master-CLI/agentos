@@ -76,7 +76,21 @@ export class Daemon {
 
     // ── Pipeline ──
     this.taskManager = new TaskManager();
-    this.reviewPipeline = new ReviewPipeline({ router: this.router, taskManager: this.taskManager });
+    this.reviewPipeline = new ReviewPipeline({
+      router: this.router,
+      taskManager: this.taskManager,
+      onOutput: (taskId, provider, stage, chunk, stream) => {
+        // Broadcast CLI agent output to all WebSocket clients
+        this.eventBus.publish({
+          id: '',
+          timestamp: new Date().toISOString(),
+          source: 'pipeline',
+          type: 'agent_output',
+          payload: { task_id: taskId, provider, stage, chunk, stream },
+          metadata: { project_id: 'default' },
+        });
+      },
+    });
 
     // ── Suggestions ──
     this.suggestionEngine = new SuggestionEngine(this.taskManager);

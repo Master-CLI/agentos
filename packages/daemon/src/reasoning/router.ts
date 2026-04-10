@@ -1,5 +1,5 @@
 import { ulid } from 'ulid';
-import type { ReasoningProvider, ReasoningTask, ReasoningResult, TaskType, ProviderName } from './types.js';
+import type { ReasoningProvider, ReasoningTask, ReasoningResult, TaskType, ProviderName, OutputCallback } from './types.js';
 
 /**
  * Routes reasoning tasks to the appropriate provider based on task type,
@@ -70,6 +70,7 @@ export class ReasoningRouter {
     context?: string;
     maxLatencyMs?: number;
     minConfidence?: number;
+    onOutput?: OutputCallback;
   }): Promise<ReasoningResult> {
     const providerName = this.route(opts.type);
     if (!providerName) {
@@ -89,6 +90,6 @@ export class ReasoningRouter {
       },
     };
 
-    return provider.invoke(task);
+    return provider.invoke(task, opts.onOutput);
   }
 }

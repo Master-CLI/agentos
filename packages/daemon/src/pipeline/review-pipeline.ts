@@ -1,5 +1,5 @@
 import type { ReasoningRouter } from '../reasoning/router.js';
-import type { ProviderName } from '../reasoning/types.js';
+import type { ProviderName, OutputCallback } from '../reasoning/types.js';
 import type { TaskManager } from './task-manager.js';
 import type { CodeTask, ReviewReport, ReviewConcern, ChangeLevel, FileDiff } from './types.js';
 import { classifyChangeLevel } from './change-classifier.js';
@@ -10,6 +10,7 @@ export interface ReviewPipelineOptions {
   router: ReasoningRouter;
   taskManager: TaskManager;
   stageTimeoutMs?: number;
+  onOutput?: (taskId: string, provider: string, stage: string, chunk: string, stream: 'stdout' | 'stderr') => void;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -30,11 +31,19 @@ export class ReviewPipeline {
   private taskManager: TaskManager;
 
   private stageTimeoutMs: number;
+  private onOutput: ReviewPipelineOptions['onOutput'];
 
   constructor(opts: ReviewPipelineOptions) {
     this.router = opts.router;
     this.taskManager = opts.taskManager;
-    this.stageTimeoutMs = opts.stageTimeoutMs ?? 120000; // 2 min per stage
+    this.stageTimeoutMs = opts.stageTimeoutMs ?? 120000;
+    this.onOutput = opts.onOutput;
+  }
+
+  private makeOutputCb(taskId: string, provider: string, stage: string): OutputCallback {
+    return (chunk, stream) => {
+      this.onOutput?.(taskId, provider, stage, chunk, stream);
+    };
   }
 
   /**
@@ -74,6 +83,7 @@ export class ReviewPipeline {
         type: 'architect',
         prompt: `Implement the following request. Return a JSON object with a "files" array, each with "path", "additions", "deletions", "content" fields.\n\nRequest: ${task.prompt}`,
         context: `Project: ${task.context.project_id}, Modules: ${task.context.related_modules.join(', ')}`,
+        onOutput: this.makeOutputCb(taskId, providers.implementer, 'implement'),
       }),
       this.stageTimeoutMs,
       'Implementation',
@@ -102,6 +112,7 @@ export class ReviewPipeline {
       this.router.execute({
         type: 'architect',
         prompt: `Write tests for the following code changes. Return a JSON object with "test_files" (array of filenames) and "passed" (boolean), "total" and "failed" (numbers).\n\nChanges:\n${JSON.stringify(diffs)}`,
+        onOutput: this.makeOutputCb(taskId, providers.tester, 'test'),
       }),
       this.stageTimeoutMs,
       'Testing',
@@ -127,6 +138,7 @@ export class ReviewPipeline {
         this.router.execute({
           type: 'diagnose',
           prompt: `Review the following code changes for issues. Return JSON with "verdict" (approve/request_changes/reject) and "concerns" array (each with file, severity, category, message).\n\nChanges:\n${JSON.stringify(diffs)}`,
+          onOutput: this.makeOutputCb(taskId, reviewer, 'review'),
         }),
         this.stageTimeoutMs,
         'Review',

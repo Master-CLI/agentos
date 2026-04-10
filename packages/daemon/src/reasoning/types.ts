@@ -23,8 +23,10 @@ export interface ReasoningResult {
   latency_ms: number;
 }
 
+export type OutputCallback = (chunk: string, stream: 'stdout' | 'stderr') => void;
+
 export interface ReasoningProvider {
   name: ProviderName;
   available: boolean;
-  invoke(task: ReasoningTask): Promise<ReasoningResult>;
+  invoke(task: ReasoningTask, onOutput?: OutputCallback): Promise<ReasoningResult>;
 }

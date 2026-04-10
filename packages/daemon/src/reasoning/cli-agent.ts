@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import type { ReasoningProvider, ReasoningTask, ReasoningResult, ProviderName } from './types.js';
+import type { ReasoningProvider, ReasoningTask, ReasoningResult, ProviderName, OutputCallback } from './types.js';
 
 export interface CliAgentConfig {
   name: ProviderName;
@@ -75,7 +75,7 @@ export class CliAgentProvider implements ReasoningProvider {
     });
   }
 
-  async invoke(task: ReasoningTask): Promise<ReasoningResult> {
+  async invoke(task: ReasoningTask, onOutput?: OutputCallback): Promise<ReasoningResult> {
     const start = Date.now();
     const args = this.config.buildArgs(task);
 
@@ -88,8 +88,16 @@ export class CliAgentProvider implements ReasoningProvider {
 
       let stdout = '';
       let stderr = '';
-      child.stdout?.on('data', (d) => { stdout += d; });
-      child.stderr?.on('data', (d) => { stderr += d; });
+      child.stdout?.on('data', (d) => {
+        const chunk = d.toString();
+        stdout += chunk;
+        onOutput?.(chunk, 'stdout');
+      });
+      child.stderr?.on('data', (d) => {
+        const chunk = d.toString();
+        stderr += chunk;
+        onOutput?.(chunk, 'stderr');
+      });
 
       child.on('close', (code) => {
         const latency = Date.now() - start;
