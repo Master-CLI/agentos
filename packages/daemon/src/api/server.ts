@@ -3,12 +3,14 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { EventBus } from '../events/event-bus.js';
 import type { TaskManager } from '../pipeline/task-manager.js';
 import type { ReviewPipeline } from '../pipeline/review-pipeline.js';
+import type { SuggestionEngine } from '../suggestions/suggestion-engine.js';
 
 export interface ApiServerOptions {
   port: number;
   eventBus: EventBus;
   taskManager?: TaskManager;
   reviewPipeline?: ReviewPipeline;
+  suggestionEngine?: SuggestionEngine;
 }
 
 export class ApiServer {
@@ -18,12 +20,14 @@ export class ApiServer {
   private eventBus: EventBus;
   private taskManager?: TaskManager;
   private reviewPipeline?: ReviewPipeline;
+  private suggestionEngine?: SuggestionEngine;
   private unsubscribe?: () => void;
 
   constructor(private opts: ApiServerOptions) {
     this.eventBus = opts.eventBus;
     this.taskManager = opts.taskManager;
     this.reviewPipeline = opts.reviewPipeline;
+    this.suggestionEngine = opts.suggestionEngine;
 
     this.httpServer = createServer((req, res) => this.handleHttp(req, res));
     this.wss = new WebSocketServer({ server: this.httpServer });
@@ -37,6 +41,7 @@ export class ApiServer {
 
   setTaskManager(tm: TaskManager): void { this.taskManager = tm; }
   setReviewPipeline(rp: ReviewPipeline): void { this.reviewPipeline = rp; }
+  setSuggestionEngine(se: SuggestionEngine): void { this.suggestionEngine = se; }
 
   start(): Promise<void> {
     return new Promise((resolve) => {
@@ -153,6 +158,24 @@ export class ApiServer {
         return this.json(res, 200, task);
       } catch {
         return this.json(res, 404, { error: 'task not found' });
+      }
+    }
+
+    // ── GET /api/suggestions ──
+    if (method === 'GET' && url === '/api/suggestions') {
+      if (!this.suggestionEngine) return this.json(res, 503, { error: 'suggestion engine not ready' });
+      return this.json(res, 200, this.suggestionEngine.list());
+    }
+
+    // ── POST /api/suggestions/:id/convert ──
+    const convertMatch = url.match(/^\/api\/suggestions\/([^/]+)\/convert$/);
+    if (method === 'POST' && convertMatch) {
+      if (!this.suggestionEngine) return this.json(res, 503, { error: 'suggestion engine not ready' });
+      try {
+        const result = this.suggestionEngine.convertToTask(convertMatch[1]);
+        return this.json(res, 201, result);
+      } catch {
+        return this.json(res, 404, { error: 'suggestion not found' });
       }
     }
 
