@@ -123,6 +123,12 @@ export async function initProject(targetDir: string): Promise<void> {
     },
   };
 
+  // Persist report for programmatic access
+  fs.writeFileSync(
+    path.join(agentosDir, 'init-report.json'),
+    JSON.stringify(report, null, 2),
+  );
+
   console.log('\n--- AgentOS Init Report ---');
   console.log(JSON.stringify(report, null, 2));
   console.log('\n.agentos/ created successfully.');

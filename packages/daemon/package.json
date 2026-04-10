@@ -10,9 +10,11 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "chokidar": "^5.0.0",
+    "simple-git": "^3.35.2",
     "sql.js": "^1.11.0",
-    "ws": "^8.17.0",
-    "ulid": "^2.3.0"
+    "ulid": "^2.3.0",
+    "ws": "^8.17.0"
   },
   "devDependencies": {
     "@types/ws": "^8.5.0",
