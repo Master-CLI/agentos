@@ -42,5 +42,13 @@ export function createProgram(): Command {
       await showStatus();
     });
 
+  program
+    .command('list')
+    .description('List all registered AgentOS projects')
+    .action(async () => {
+      const { listProjects } = await import('./commands/list.js');
+      await listProjects();
+    });
+
   return program;
 }

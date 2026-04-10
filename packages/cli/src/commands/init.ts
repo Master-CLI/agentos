@@ -134,5 +134,11 @@ export async function initProject(targetDir: string): Promise<void> {
   console.log('\n.agentos/ created successfully.');
   console.log(`  Ollama:     ${report.environment.ollama}`);
   console.log(`  CLI Agents: ${report.environment.cli_agents}`);
+  // Register in global project list
+  try {
+    const { registerProject } = await import('./list.js');
+    registerProject(targetDir);
+  } catch { /* ignore if list module not available */ }
+
   console.log(`\nRun 'agentos start' to launch the daemon.`);
 }

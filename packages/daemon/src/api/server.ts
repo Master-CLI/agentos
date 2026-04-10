@@ -4,6 +4,8 @@ import type { EventBus } from '../events/event-bus.js';
 import type { TaskManager } from '../pipeline/task-manager.js';
 import type { ReviewPipeline } from '../pipeline/review-pipeline.js';
 import type { SuggestionEngine } from '../suggestions/suggestion-engine.js';
+import type { MetricsCollector } from '../telemetry/metrics-collector.js';
+import type { AuditLog } from '../telemetry/audit-log.js';
 
 export interface ApiServerOptions {
   port: number;
@@ -11,6 +13,9 @@ export interface ApiServerOptions {
   taskManager?: TaskManager;
   reviewPipeline?: ReviewPipeline;
   suggestionEngine?: SuggestionEngine;
+  metricsCollector?: MetricsCollector;
+  auditLog?: AuditLog;
+  configPath?: string;
 }
 
 export class ApiServer {
@@ -21,6 +26,9 @@ export class ApiServer {
   private taskManager?: TaskManager;
   private reviewPipeline?: ReviewPipeline;
   private suggestionEngine?: SuggestionEngine;
+  private metricsCollector?: MetricsCollector;
+  private auditLog?: AuditLog;
+  private configPath?: string;
   private unsubscribe?: () => void;
 
   constructor(private opts: ApiServerOptions) {
@@ -28,6 +36,9 @@ export class ApiServer {
     this.taskManager = opts.taskManager;
     this.reviewPipeline = opts.reviewPipeline;
     this.suggestionEngine = opts.suggestionEngine;
+    this.metricsCollector = opts.metricsCollector;
+    this.auditLog = opts.auditLog;
+    this.configPath = opts.configPath;
 
     this.httpServer = createServer((req, res) => this.handleHttp(req, res));
     this.wss = new WebSocketServer({ server: this.httpServer });
@@ -42,6 +53,9 @@ export class ApiServer {
   setTaskManager(tm: TaskManager): void { this.taskManager = tm; }
   setReviewPipeline(rp: ReviewPipeline): void { this.reviewPipeline = rp; }
   setSuggestionEngine(se: SuggestionEngine): void { this.suggestionEngine = se; }
+  setMetricsCollector(mc: MetricsCollector): void { this.metricsCollector = mc; }
+  setAuditLog(al: AuditLog): void { this.auditLog = al; }
+  setConfigPath(p: string): void { this.configPath = p; }
 
   start(): Promise<void> {
     return new Promise((resolve) => {
@@ -159,6 +173,45 @@ export class ApiServer {
       } catch {
         return this.json(res, 404, { error: 'task not found' });
       }
+    }
+
+    // ── GET /api/telemetry/metrics ──
+    if (method === 'GET' && url === '/api/telemetry/metrics') {
+      if (!this.metricsCollector) return this.json(res, 503, { error: 'metrics not ready' });
+      return this.json(res, 200, this.metricsCollector.getMetrics(this.taskManager));
+    }
+
+    // ── GET /api/telemetry/traces?task_id=X ──
+    if (method === 'GET' && url.startsWith('/api/telemetry/traces')) {
+      if (!this.metricsCollector || !this.taskManager) return this.json(res, 503, { error: 'not ready' });
+      const params = new URL(url, `http://localhost`).searchParams;
+      const taskId = params.get('task_id');
+      if (!taskId) return this.json(res, 400, { error: 'task_id required' });
+      const trace = this.metricsCollector.getTaskTrace(this.taskManager, taskId);
+      if (!trace) return this.json(res, 404, { error: 'task not found' });
+      return this.json(res, 200, trace);
+    }
+
+    // ── PUT /api/settings ──
+    if (method === 'PUT' && url === '/api/settings') {
+      if (!this.configPath) return this.json(res, 503, { error: 'config not ready' });
+      const body = await this.readBody(req);
+      const updates = JSON.parse(body);
+      const fs = await import('node:fs');
+      let config: Record<string, unknown> = {};
+      try { config = JSON.parse(fs.readFileSync(this.configPath, 'utf-8')); } catch { /* fresh */ }
+      Object.assign(config, updates);
+      fs.writeFileSync(this.configPath, JSON.stringify(config, null, 2));
+      return this.json(res, 200, config);
+    }
+
+    // ── GET /api/audit ──
+    if (method === 'GET' && url.startsWith('/api/audit')) {
+      if (!this.auditLog) return this.json(res, 503, { error: 'audit not ready' });
+      const params = new URL(url, `http://localhost`).searchParams;
+      const from = params.get('from') ?? undefined;
+      const to = params.get('to') ?? undefined;
+      return this.json(res, 200, this.auditLog.query({ from, to }));
     }
 
     // ── GET /api/suggestions ──
