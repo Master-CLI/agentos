@@ -17,6 +17,7 @@ import { DampingController } from './trust/damping.js';
 import { FeedbackTracker } from './trust/feedback-tracker.js';
 import { MetricsCollector } from './telemetry/metrics-collector.js';
 import { AuditLog } from './telemetry/audit-log.js';
+import { initialScan } from './observers/initial-scanner.js';
 import type { Observer } from './observers/types.js';
 import type { ProviderName } from './reasoning/types.js';
 
@@ -107,6 +108,12 @@ export class Daemon {
   async start(): Promise<void> {
     // ── Initialize stores ──
     await this.eventStore.ensureReady();
+
+    // ── Initial scan (first start only — populates existing files + git history) ──
+    const scanned = await initialScan(this.opts.projectDir, this.eventStore, 'default');
+    if (scanned > 0) {
+      this.auditLog.record({ actor: 'system', action: 'initial_scan', target: `${scanned} items` });
+    }
 
     // ── Rebuild snapshot from persisted events ──
     await this.snapshotEngine.rebuild();

@@ -24,11 +24,30 @@ export async function startDaemon(port: string | number): Promise<void> {
     }
   }
 
+  // Read port from config if not specified on CLI
+  let resolvedPort = typeof port === 'string' ? parseInt(port, 10) : port;
+  try {
+    const config = JSON.parse(fs.readFileSync(path.join(agentosDir, 'config.json'), 'utf-8'));
+    if (resolvedPort === 3382 && config.port) {
+      resolvedPort = config.port;
+    }
+  } catch { /* use default */ }
+
+  // Check if port is already in use
+  try {
+    const res = await fetch(`http://localhost:${resolvedPort}/health`);
+    if (res.ok) {
+      console.error(`Error: Port ${resolvedPort} is already in use (another AgentOS instance?).`);
+      console.error(`  Try: agentos start --port ${resolvedPort + 1}`);
+      process.exit(1);
+    }
+  } catch { /* port is free, good */ }
+
   const { Daemon } = await import('@agentos/daemon');
 
   const daemon = new Daemon({
     projectDir,
-    port: typeof port === 'string' ? parseInt(port, 10) : port,
+    port: resolvedPort,
   });
 
   // Graceful shutdown

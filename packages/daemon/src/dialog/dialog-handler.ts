@@ -101,29 +101,72 @@ export class DialogHandler {
 
   private buildPrompt(question: string, ctx: DialogContext): string {
     const snap = ctx.snapshot;
-    const recentSummary = ctx.recentEvents.slice(-20).map((e) => {
-      const detail = e.payload.path ?? e.payload.message ?? e.payload.branch ?? '';
+
+    // Separate scanned (existing) vs live (observed) events
+    const fileEvents = ctx.recentEvents.filter((e) => e.type === 'file_exists');
+    const commitEvents = ctx.recentEvents.filter((e) => e.type === 'commit_exists' || e.type === 'commit_pushed');
+    const projectInfo = ctx.recentEvents.find((e) => e.type === 'project_info');
+    const liveEvents = ctx.recentEvents.filter((e) =>
+      !['file_exists', 'commit_exists', 'project_info'].includes(e.type)
+    );
+
+    // Build file tree summary (by extension)
+    const extCounts: Record<string, number> = {};
+    for (const e of fileEvents) {
+      const ext = String(e.payload.ext || 'other');
+      extCounts[ext] = (extCounts[ext] ?? 0) + 1;
+    }
+    const filesSummary = Object.entries(extCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([ext, count]) => `  ${ext}: ${count} files`)
+      .join('\n');
+
+    const commitsSummary = commitEvents.slice(-10).map((e) =>
+      `  ${String(e.payload.hash ?? '').slice(0, 7)} ${e.payload.message}`
+    ).join('\n');
+
+    const liveSummary = liveEvents.slice(-15).map((e) => {
+      const detail = e.payload.relative ?? e.payload.path ?? e.payload.message ?? '';
       return `  [${e.type}] ${detail}`;
     }).join('\n');
 
-    return (
-      `You are AgentOS, an intelligent project coordination assistant. ` +
+    let prompt =
+      `You are AgentOS, an intelligent project coordination assistant.\n` +
       `You observe the project continuously and answer questions based on what you see.\n` +
       `Answer concisely in the same language as the question.\n` +
       `Do NOT offer to write code or modify files — that is the user's job.\n` +
-      `Focus on analysis, risks, patterns, and suggestions.\n\n` +
-      `## Project State\n` +
-      `- Total events observed: ${snap.metrics.total_events}\n` +
-      `- Events in last hour: ${snap.metrics.events_last_hour}\n` +
-      `- Active files tracked: ${snap.metrics.active_files}\n` +
-      `- Recent commits: ${snap.recent_commits.length}\n` +
-      `- Pending suggestions: ${ctx.pendingSuggestions}\n\n` +
-      `## Recent Activity\n${recentSummary || '(no recent events)'}\n\n` +
-      (snap.recent_commits.length > 0
-        ? `## Recent Commits\n${snap.recent_commits.slice(0, 5).map((c) => `  ${c.hash.slice(0, 7)} ${c.message}`).join('\n')}\n\n`
-        : '') +
-      `## User Question\n${question}`
-    );
+      `Focus on analysis, risks, patterns, and suggestions.\n\n`;
+
+    if (projectInfo) {
+      const p = projectInfo.payload;
+      prompt += `## Project\n`;
+      prompt += `- Name: ${p.name}\n`;
+      if (p.description) prompt += `- Description: ${p.description}\n`;
+      if (Array.isArray(p.dependencies) && p.dependencies.length > 0)
+        prompt += `- Dependencies: ${(p.dependencies as string[]).join(', ')}\n`;
+      if (Array.isArray(p.devDependencies) && p.devDependencies.length > 0)
+        prompt += `- Dev dependencies: ${(p.devDependencies as string[]).join(', ')}\n`;
+      if (Array.isArray(p.scripts) && p.scripts.length > 0)
+        prompt += `- Scripts: ${(p.scripts as string[]).join(', ')}\n`;
+      prompt += '\n';
+    }
+
+    prompt += `## Files (${fileEvents.length} total)\n${filesSummary || '(none scanned)'}\n\n`;
+    prompt += `## Commits\n${commitsSummary || '(no commits)'}\n\n`;
+
+    if (liveSummary) {
+      prompt += `## Live Activity (since daemon started)\n${liveSummary}\n\n`;
+    }
+
+    prompt +=
+      `## Stats\n` +
+      `- Total events: ${snap.metrics.total_events}\n` +
+      `- Events last hour: ${snap.metrics.events_last_hour}\n` +
+      `- Pending suggestions: ${ctx.pendingSuggestions}\n\n`;
+
+    prompt += `## User Question\n${question}`;
+    return prompt;
   }
 
   private fallbackAnswer(question: string, ctx: DialogContext): string {

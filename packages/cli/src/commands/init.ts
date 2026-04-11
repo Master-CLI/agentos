@@ -1,6 +1,28 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { execSync } from 'node:child_process';
+
+/**
+ * Pick a unique port based on existing registered projects.
+ * Base port 3382, each subsequent project gets +1.
+ */
+function pickPort(targetDir: string): number {
+  const BASE_PORT = 3382;
+  try {
+    const registryPath = path.join(os.homedir(), '.agentos-projects.json');
+    if (!fs.existsSync(registryPath)) return BASE_PORT;
+    const projects: string[] = JSON.parse(fs.readFileSync(registryPath, 'utf-8'));
+    // If this project is already registered, keep its existing port
+    const normalized = path.resolve(targetDir);
+    const idx = projects.findIndex((p) => path.resolve(p) === normalized);
+    if (idx >= 0) return BASE_PORT + idx;
+    // New project → next port
+    return BASE_PORT + projects.length;
+  } catch {
+    return BASE_PORT;
+  }
+}
 
 interface ProviderInfo {
   name: string;
@@ -99,7 +121,7 @@ export async function initProject(targetDir: string): Promise<void> {
       endpoint: 'http://localhost:11434',
     },
     providers,
-    port: 3382,
+    port: pickPort(targetDir),
   };
 
   fs.writeFileSync(
@@ -190,11 +212,14 @@ curl -X PUT http://localhost:${config.port}/api/settings \\
     fs.writeFileSync(guidePath, guideContent);
   }
 
-  // Register in global project list
-  try {
-    const { registerProject } = await import('./list.js');
-    registerProject(targetDir);
-  } catch { /* ignore if list module not available */ }
+  // Register in global project list (skip temp directories from tests)
+  const isTempDir = targetDir.includes(os.tmpdir()) || targetDir.includes('\\Temp\\') || targetDir.includes('/tmp/');
+  if (!isTempDir) {
+    try {
+      const { registerProject } = await import('./list.js');
+      registerProject(targetDir);
+    } catch { /* ignore if list module not available */ }
+  }
 
   console.log(`\nRun 'agentos start' to launch the daemon.`);
   console.log(`Run 'agentos open' to open the web console.`);
