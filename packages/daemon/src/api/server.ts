@@ -4,11 +4,10 @@ import * as fs from 'node:fs';
 import * as nodePath from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { EventBus } from '../events/event-bus.js';
-import type { TaskManager } from '../pipeline/task-manager.js';
-import type { ReviewPipeline } from '../pipeline/review-pipeline.js';
 import type { SuggestionEngine } from '../suggestions/suggestion-engine.js';
 import type { MetricsCollector } from '../telemetry/metrics-collector.js';
 import type { AuditLog } from '../telemetry/audit-log.js';
+import type { DialogHandler } from '../dialog/dialog-handler.js';
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html',
@@ -33,8 +32,7 @@ function resolveWebDir(): string | null {
 export interface ApiServerOptions {
   port: number;
   eventBus: EventBus;
-  taskManager?: TaskManager;
-  reviewPipeline?: ReviewPipeline;
+  dialogHandler?: DialogHandler;
   suggestionEngine?: SuggestionEngine;
   metricsCollector?: MetricsCollector;
   auditLog?: AuditLog;
@@ -46,8 +44,7 @@ export class ApiServer {
   private wss: WebSocketServer;
   private clients: Set<WebSocket> = new Set();
   private eventBus: EventBus;
-  private taskManager?: TaskManager;
-  private reviewPipeline?: ReviewPipeline;
+  private dialogHandler?: DialogHandler;
   private suggestionEngine?: SuggestionEngine;
   private metricsCollector?: MetricsCollector;
   private auditLog?: AuditLog;
@@ -56,8 +53,7 @@ export class ApiServer {
 
   constructor(private opts: ApiServerOptions) {
     this.eventBus = opts.eventBus;
-    this.taskManager = opts.taskManager;
-    this.reviewPipeline = opts.reviewPipeline;
+    this.dialogHandler = opts.dialogHandler;
     this.suggestionEngine = opts.suggestionEngine;
     this.metricsCollector = opts.metricsCollector;
     this.auditLog = opts.auditLog;
@@ -73,8 +69,7 @@ export class ApiServer {
     });
   }
 
-  setTaskManager(tm: TaskManager): void { this.taskManager = tm; }
-  setReviewPipeline(rp: ReviewPipeline): void { this.reviewPipeline = rp; }
+  setDialogHandler(dh: DialogHandler): void { this.dialogHandler = dh; }
   setSuggestionEngine(se: SuggestionEngine): void { this.suggestionEngine = se; }
   setMetricsCollector(mc: MetricsCollector): void { this.metricsCollector = mc; }
   setAuditLog(al: AuditLog): void { this.auditLog = al; }
@@ -85,16 +80,6 @@ export class ApiServer {
       this.httpServer.listen(this.opts.port, () => {
         this.unsubscribe = this.eventBus.subscribe((event) => {
           const msg = JSON.stringify(event);
-          for (const client of this.clients) {
-            if (client.readyState === WebSocket.OPEN) {
-              client.send(msg);
-            }
-          }
-        });
-
-        // Forward task status changes over WebSocket
-        this.taskManager?.events.on('task_status_changed', (data) => {
-          const msg = JSON.stringify({ type: 'task_status_changed', ...data });
           for (const client of this.clients) {
             if (client.readyState === WebSocket.OPEN) {
               client.send(msg);
@@ -136,83 +121,51 @@ export class ApiServer {
       return this.json(res, 200, { status: 'ok', timestamp: new Date().toISOString() });
     }
 
-    // ── POST /api/dialog ──
+    // ── POST /api/dialog — 项目问答 ──
     if (method === 'POST' && url === '/api/dialog') {
-      if (!this.taskManager) return this.json(res, 503, { error: 'task manager not ready' });
+      if (!this.dialogHandler) return this.json(res, 503, { error: 'dialog not ready' });
       const body = await this.readBody(req);
-      const { prompt } = JSON.parse(body);
-      if (!prompt) return this.json(res, 400, { error: 'prompt is required' });
+      const { question } = JSON.parse(body);
+      if (!question) return this.json(res, 400, { error: 'question is required' });
 
-      const task = this.taskManager.create({
-        prompt,
-        origin: 'user',
-        projectId: 'default',
-      });
+      // Stream output via WebSocket while waiting for answer
+      const onOutput = (chunk: string, stream: 'stdout' | 'stderr') => {
+        const msg = JSON.stringify({ type: 'dialog_stream', payload: { chunk, stream } });
+        for (const client of this.clients) {
+          if (client.readyState === WebSocket.OPEN) client.send(msg);
+        }
+      };
 
-      // Start pipeline execution in background (non-blocking)
-      if (this.reviewPipeline) {
-        this.reviewPipeline.execute(task.id).catch(() => {
-          // Pipeline errors are tracked in the task itself
-        });
-      }
-
-      return this.json(res, 201, { task_id: task.id });
-    }
-
-    // ── GET /api/tasks ──
-    if (method === 'GET' && url === '/api/tasks') {
-      if (!this.taskManager) return this.json(res, 503, { error: 'task manager not ready' });
-      return this.json(res, 200, this.taskManager.list());
-    }
-
-    // ── GET /api/tasks/:id ──
-    const taskMatch = url.match(/^\/api\/tasks\/([^/]+)$/);
-    if (method === 'GET' && taskMatch) {
-      if (!this.taskManager) return this.json(res, 503, { error: 'task manager not ready' });
-      const task = this.taskManager.get(taskMatch[1]);
-      if (!task) return this.json(res, 404, { error: 'task not found' });
-      return this.json(res, 200, task);
-    }
-
-    // ── POST /api/tasks/:id/accept ──
-    const acceptMatch = url.match(/^\/api\/tasks\/([^/]+)\/accept$/);
-    if (method === 'POST' && acceptMatch) {
-      if (!this.taskManager) return this.json(res, 503, { error: 'task manager not ready' });
       try {
-        const task = this.taskManager.updateStatus(acceptMatch[1], 'completed');
-        return this.json(res, 200, task);
-      } catch {
-        return this.json(res, 404, { error: 'task not found' });
+        const answer = await this.dialogHandler.ask(question, onOutput);
+        return this.json(res, 200, answer);
+      } catch (err) {
+        return this.json(res, 500, { error: String(err) });
       }
     }
 
-    // ── POST /api/tasks/:id/discard ──
-    const discardMatch = url.match(/^\/api\/tasks\/([^/]+)\/discard$/);
-    if (method === 'POST' && discardMatch) {
-      if (!this.taskManager) return this.json(res, 503, { error: 'task manager not ready' });
-      try {
-        const task = this.taskManager.updateStatus(discardMatch[1], 'cancelled');
-        return this.json(res, 200, task);
-      } catch {
-        return this.json(res, 404, { error: 'task not found' });
-      }
+    // ── GET /api/dialog/history ──
+    if (method === 'GET' && url === '/api/dialog/history') {
+      if (!this.dialogHandler) return this.json(res, 503, { error: 'dialog not ready' });
+      return this.json(res, 200, this.dialogHandler.getHistory());
+    }
+
+    // ── GET /api/dialog/context — 当前项目上下文 ──
+    if (method === 'GET' && url === '/api/dialog/context') {
+      if (!this.dialogHandler) return this.json(res, 503, { error: 'dialog not ready' });
+      return this.json(res, 200, this.dialogHandler.getContext());
     }
 
     // ── GET /api/telemetry/metrics ──
     if (method === 'GET' && url === '/api/telemetry/metrics') {
       if (!this.metricsCollector) return this.json(res, 503, { error: 'metrics not ready' });
-      return this.json(res, 200, this.metricsCollector.getMetrics(this.taskManager));
+      return this.json(res, 200, this.metricsCollector.getMetrics());
     }
 
-    // ── GET /api/telemetry/traces?task_id=X ──
-    if (method === 'GET' && url.startsWith('/api/telemetry/traces')) {
-      if (!this.metricsCollector || !this.taskManager) return this.json(res, 503, { error: 'not ready' });
-      const params = new URL(url, `http://localhost`).searchParams;
-      const taskId = params.get('task_id');
-      if (!taskId) return this.json(res, 400, { error: 'task_id required' });
-      const trace = this.metricsCollector.getTaskTrace(this.taskManager, taskId);
-      if (!trace) return this.json(res, 404, { error: 'task not found' });
-      return this.json(res, 200, trace);
+    // ── GET /api/telemetry/events — recent event summary ──
+    if (method === 'GET' && url === '/api/telemetry/events') {
+      if (!this.metricsCollector) return this.json(res, 503, { error: 'not ready' });
+      return this.json(res, 200, this.metricsCollector.getMetrics());
     }
 
     // ── PUT /api/settings ──
@@ -243,13 +196,25 @@ export class ApiServer {
       return this.json(res, 200, this.suggestionEngine.list());
     }
 
-    // ── POST /api/suggestions/:id/convert ──
-    const convertMatch = url.match(/^\/api\/suggestions\/([^/]+)\/convert$/);
-    if (method === 'POST' && convertMatch) {
+    // ── POST /api/suggestions/:id/dismiss ──
+    const dismissMatch = url.match(/^\/api\/suggestions\/([^/]+)\/dismiss$/);
+    if (method === 'POST' && dismissMatch) {
       if (!this.suggestionEngine) return this.json(res, 503, { error: 'suggestion engine not ready' });
       try {
-        const result = this.suggestionEngine.convertToTask(convertMatch[1]);
-        return this.json(res, 201, result);
+        const s = this.suggestionEngine.dismiss(dismissMatch[1]);
+        return this.json(res, 200, s);
+      } catch {
+        return this.json(res, 404, { error: 'suggestion not found' });
+      }
+    }
+
+    // ── POST /api/suggestions/:id/acknowledge ──
+    const ackMatch = url.match(/^\/api\/suggestions\/([^/]+)\/acknowledge$/);
+    if (method === 'POST' && ackMatch) {
+      if (!this.suggestionEngine) return this.json(res, 503, { error: 'suggestion engine not ready' });
+      try {
+        const s = this.suggestionEngine.acknowledge(ackMatch[1]);
+        return this.json(res, 200, s);
       } catch {
         return this.json(res, 404, { error: 'suggestion not found' });
       }

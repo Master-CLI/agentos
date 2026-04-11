@@ -1,19 +1,16 @@
 import { useState } from 'react';
 import './styles.css';
 import { useWebSocket } from './hooks/useWebSocket';
-import { DialogInput } from './views/DialogInput';
-import { TaskPanel } from './views/TaskPanel';
-import { TaskDetail } from './views/TaskDetail';
+import { DialogChat } from './views/DialogChat';
 import { SuggestionInbox } from './views/SuggestionInbox';
 import { StatusOverview } from './views/StatusOverview';
 import { ChangeStream } from './views/ChangeStream';
 
-type View = 'tasks' | 'suggestions' | 'status' | 'events';
+type View = 'chat' | 'suggestions' | 'status' | 'events';
 
 export default function App() {
-  const { status, lastMessage } = useWebSocket();
-  const [view, setView] = useState<View>('tasks');
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const { status } = useWebSocket();
+  const [view, setView] = useState<View>('chat');
 
   return (
     <div className="layout">
@@ -21,10 +18,10 @@ export default function App() {
         <h1>AgentOS</h1>
         <div style={{ fontSize: 12, marginBottom: 12, color: 'var(--text-dim)' }}>
           <span className={`status-dot ${status}`} />
-          {status === 'connected' ? 'Daemon 运行中' : status === 'connecting' ? '连接中...' : '未连接'}
+          {status === 'connected' ? 'Daemon running' : status === 'connecting' ? 'Connecting...' : 'Disconnected'}
         </div>
-        <button className={view === 'tasks' ? 'active' : ''} onClick={() => { setView('tasks'); setSelectedTaskId(null); }}>
-          Tasks
+        <button className={view === 'chat' ? 'active' : ''} onClick={() => setView('chat')}>
+          Chat
         </button>
         <button className={view === 'suggestions' ? 'active' : ''} onClick={() => setView('suggestions')}>
           Suggestions
@@ -38,14 +35,7 @@ export default function App() {
       </nav>
 
       <main className="main">
-        <DialogInput onTaskCreated={(id) => { setView('tasks'); setSelectedTaskId(id); }} />
-
-        {view === 'tasks' && !selectedTaskId && (
-          <TaskPanel onSelect={(id) => setSelectedTaskId(id)} />
-        )}
-        {view === 'tasks' && selectedTaskId && (
-          <TaskDetail taskId={selectedTaskId} onBack={() => setSelectedTaskId(null)} />
-        )}
+        {view === 'chat' && <DialogChat />}
         {view === 'suggestions' && <SuggestionInbox />}
         {view === 'status' && <StatusOverview />}
         {view === 'events' && <ChangeStream />}

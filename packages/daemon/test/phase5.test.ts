@@ -3,7 +3,6 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { Daemon } from '../src/daemon.js';
-import { TaskManager } from '../src/pipeline/task-manager.js';
 import { MetricsCollector } from '../src/telemetry/metrics-collector.js';
 import { AuditLog } from '../src/telemetry/audit-log.js';
 import { SuggestionEngine } from '../src/suggestions/suggestion-engine.js';
@@ -25,7 +24,6 @@ describe('Phase 5 — 自观测', () => {
   let daemon: Daemon;
   let projectDir: string;
   let baseUrl: string;
-  let tm: TaskManager;
   let mc: MetricsCollector;
 
   beforeAll(async () => {
@@ -35,19 +33,17 @@ describe('Phase 5 — 自观测', () => {
     await daemon.start();
     baseUrl = `http://localhost:${daemon.port}`;
 
-    tm = new TaskManager();
     mc = new MetricsCollector();
-    (daemon as any).apiServer.setTaskManager(tm);
     (daemon as any).apiServer.setMetricsCollector(mc);
 
-    // Create some tasks for metrics
-    const t1 = tm.create({ prompt: 'task 1', origin: 'user', projectId: 'test' });
-    tm.create({ prompt: 'task 2', origin: 'system', projectId: 'test' });
-    mc.recordPipelineLatency(1500);
-    mc.recordPipelineLatency(2500);
+    // Record dialog interactions for metrics
+    mc.recordDialog(1500);
+    mc.recordDialog(2500);
     mc.recordProviderCall('claude-code');
     mc.recordProviderCall('claude-code');
     mc.recordProviderCall('codex');
+    mc.recordSuggestion(false);
+    mc.recordSuggestion(true);
   });
 
   afterAll(async () => {
@@ -55,26 +51,16 @@ describe('Phase 5 — 自观测', () => {
     safeRmSync(projectDir);
   });
 
-  it('GET /api/telemetry/metrics → 返回 tasks_total, avg_latency, provider_usage', async () => {
+  it('GET /api/telemetry/metrics → 返回 dialog_count, avg_response_latency_ms, provider_usage, suggestions_total', async () => {
     const res = await fetch(`${baseUrl}/api/telemetry/metrics`);
     expect(res.status).toBe(200);
     const body = await res.json() as any;
-    expect(body.tasks_total).toBe(2);
-    expect(body.avg_pipeline_latency_ms).toBe(2000);
+    expect(body.dialog_count).toBe(2);
+    expect(body.avg_response_latency_ms).toBe(2000);
     expect(body.provider_usage['claude-code']).toBe(2);
     expect(body.provider_usage['codex']).toBe(1);
-  });
-
-  it('GET /api/telemetry/traces?task_id=X → 返回完整 trace', async () => {
-    const tasks = tm.list();
-    const id = tasks[0].id;
-    const res = await fetch(`${baseUrl}/api/telemetry/traces?task_id=${id}`);
-    expect(res.status).toBe(200);
-    const body = await res.json() as any;
-    expect(body.task_id).toBe(id);
-    expect(body.prompt).toBeTruthy();
-    expect(body.pipeline).toBeTruthy();
-    expect(body.pipeline.consensus).toBeTruthy();
+    expect(body.suggestions_total).toBe(2);
+    expect(body.suggestions_converted).toBe(1);
   });
 });
 

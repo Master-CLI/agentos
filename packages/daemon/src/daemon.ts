@@ -10,8 +10,7 @@ import { LocalLlmProvider } from './reasoning/local-llm.js';
 import { CliAgentProvider } from './reasoning/cli-agent.js';
 import { SnapshotEngine } from './state/snapshot-engine.js';
 import { detectModules } from './state/module-detector.js';
-import { TaskManager } from './pipeline/task-manager.js';
-import { ReviewPipeline } from './pipeline/review-pipeline.js';
+import { DialogHandler } from './dialog/dialog-handler.js';
 import { SuggestionEngine } from './suggestions/suggestion-engine.js';
 import { ConfidenceCalibrator } from './trust/confidence-calibrator.js';
 import { DampingController } from './trust/damping.js';
@@ -42,9 +41,8 @@ export class Daemon {
   // State
   private snapshotEngine: SnapshotEngine;
 
-  // Pipeline
-  private taskManager: TaskManager;
-  private reviewPipeline: ReviewPipeline;
+  // Dialog
+  private dialogHandler: DialogHandler;
 
   // Suggestions
   private suggestionEngine: SuggestionEngine;
@@ -74,31 +72,16 @@ export class Daemon {
     // ── L2: State ──
     this.snapshotEngine = new SnapshotEngine('default', this.eventStore, this.eventBus);
 
-    // ── Pipeline ──
-    this.taskManager = new TaskManager();
-    this.reviewPipeline = new ReviewPipeline({
-      router: this.router,
-      taskManager: this.taskManager,
-      onOutput: (taskId, provider, stage, chunk, stream) => {
-        // Broadcast CLI agent output to all WebSocket clients
-        this.eventBus.publish({
-          id: '',
-          timestamp: new Date().toISOString(),
-          source: 'pipeline',
-          type: 'agent_output',
-          payload: { task_id: taskId, provider, stage, chunk, stream },
-          metadata: { project_id: 'default' },
-        });
-      },
-    });
-
     // ── Suggestions ──
-    this.suggestionEngine = new SuggestionEngine(this.taskManager);
+    this.suggestionEngine = new SuggestionEngine();
 
     // ── Trust ──
     this.confidenceCalibrator = new ConfidenceCalibrator();
     this.dampingController = new DampingController();
     this.feedbackTracker = new FeedbackTracker();
+
+    // ── Dialog ──
+    this.dialogHandler = new DialogHandler(this.router, this.snapshotEngine, this.eventStore, this.suggestionEngine);
 
     // ── Telemetry ──
     this.metricsCollector = new MetricsCollector();
@@ -108,8 +91,7 @@ export class Daemon {
     this.apiServer = new ApiServer({
       port: opts.port,
       eventBus: this.eventBus,
-      taskManager: this.taskManager,
-      reviewPipeline: this.reviewPipeline,
+      dialogHandler: this.dialogHandler,
       suggestionEngine: this.suggestionEngine,
       metricsCollector: this.metricsCollector,
       auditLog: this.auditLog,
@@ -176,9 +158,9 @@ export class Daemon {
 
   getEventStore(): EventStore { return this.eventStore; }
   getEventBus(): EventBus { return this.eventBus; }
-  getTaskManager(): TaskManager { return this.taskManager; }
   getRouter(): ReasoningRouter { return this.router; }
   getSnapshotEngine(): SnapshotEngine { return this.snapshotEngine; }
+  getDialogHandler(): DialogHandler { return this.dialogHandler; }
   getSuggestionEngine(): SuggestionEngine { return this.suggestionEngine; }
   getMetricsCollector(): MetricsCollector { return this.metricsCollector; }
   getAuditLog(): AuditLog { return this.auditLog; }
@@ -233,42 +215,59 @@ export class Daemon {
   private wireEventHandlers(): void {
     // Persist all bus events to store
     this.eventBus.subscribe((event) => {
-      // Events from observers arrive on the bus without being stored yet
-      // Only persist if they don't have an ID yet (raw observer events)
       if (!event.id) {
         this.eventStore.append(event);
       }
     });
 
-    // Track git commits for flow detection
+    // Track git commits for flow detection (damping)
     this.eventBus.subscribe((event) => {
       if (event.type === 'commit_pushed') {
         this.dampingController.recordCommit();
       }
     });
 
-    // Record metrics for pipeline completions
-    this.taskManager.events.on('task_status_changed', ({ task, status }: any) => {
-      this.auditLog.record({
-        actor: task.origin === 'user' ? 'user' : 'system',
-        action: `task_${status}`,
-        target: task.id,
-      });
-
-      if (status === 'completed') {
-        this.metricsCollector.recordPipelineLatency(
-          Date.now() - new Date(task.created_at).getTime()
-        );
-      }
-
-      if (status === 'cancelled') {
-        this.feedbackTracker.record({
-          type: 'task_discarded',
-          source_id: task.id,
-          provider: task.pipeline?.implementation?.provider ?? undefined,
-          user_action: 'discard',
-        });
-      }
+    // Auto-generate suggestions from significant events
+    this.eventBus.subscribe((event) => {
+      this.tryGenerateSuggestion(event);
     });
+  }
+
+  /**
+   * Analyze events and auto-generate suggestions when patterns are detected.
+   */
+  private tryGenerateSuggestion(event: import('./events/types.js').ProjectEvent): void {
+    // Don't suggest during flow state
+    if (this.dampingController.isInFlow()) return;
+
+    const region = typeof event.payload.path === 'string' ? event.payload.path : undefined;
+    if (this.dampingController.shouldSuppress(region)) return;
+
+    // Pattern: large file modification (potential risk)
+    if (event.type === 'file_modified' && typeof event.payload.size === 'number' && event.payload.size > 50000) {
+      this.suggestionEngine.create({
+        category: 'architecture',
+        summary: `Large file modified: ${String(event.payload.path).split(/[/\\]/).pop()}`,
+        detail: `File is ${Math.round(Number(event.payload.size) / 1024)}KB. Consider splitting into smaller modules.`,
+        evidence: [event.id ?? event.type],
+        confidence: 0.6,
+        impact: 'low',
+        region,
+      });
+      this.dampingController.recordSuggestion(region);
+    }
+
+    // Pattern: commit with many files changed
+    if (event.type === 'commit_pushed' && Array.isArray(event.payload.files_changed) && event.payload.files_changed.length > 10) {
+      this.suggestionEngine.create({
+        category: 'architecture',
+        summary: `Large commit: ${event.payload.files_changed.length} files changed`,
+        detail: `Commit "${String(event.payload.message).slice(0, 60)}" touches many files. Consider breaking into smaller commits.`,
+        evidence: [event.id ?? event.type],
+        confidence: 0.7,
+        impact: 'medium',
+      });
+      this.dampingController.recordSuggestion();
+    }
   }
 }

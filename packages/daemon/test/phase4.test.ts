@@ -3,7 +3,6 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { SuggestionEngine } from '../src/suggestions/suggestion-engine.js';
-import { TaskManager } from '../src/pipeline/task-manager.js';
 import { ConfidenceCalibrator } from '../src/trust/confidence-calibrator.js';
 import { DampingController } from '../src/trust/damping.js';
 import { FeedbackTracker } from '../src/trust/feedback-tracker.js';
@@ -50,38 +49,6 @@ describe('Phase 4 — 建议引擎', () => {
     expect(s.evidence.length).toBeGreaterThan(0);
     expect(s.confidence).toBe(0.95);
     expect(s.impact).toBe('high');
-  });
-});
-
-// ─── 建议 → 任务转化 ───
-
-describe('Phase 4 — 建议→任务转化', () => {
-  it('convert 后创建 CodeTask，origin 为 system', () => {
-    const tm = new TaskManager();
-    const se = new SuggestionEngine(tm);
-    const s = se.create({
-      category: 'ci_failure',
-      summary: '修复 CI 失败',
-      detail: '详细...',
-      evidence: ['e1'],
-      confidence: 0.8,
-      impact: 'medium',
-    });
-    const result = se.convertToTask(s.id);
-    expect(result.task_id).toBeTruthy();
-
-    const task = tm.get(result.task_id)!;
-    expect(task.origin).toBe('system');
-    expect(task.source_suggestion_id).toBe(s.id);
-  });
-
-  it('convert 后建议状态变为 converted', () => {
-    const tm = new TaskManager();
-    const se = new SuggestionEngine(tm);
-    const s = se.create({ category: 'general', summary: 'x', detail: 'd', evidence: [], confidence: 0.5, impact: 'low' });
-    se.convertToTask(s.id);
-    expect(se.get(s.id)!.status).toBe('converted');
-    expect(se.get(s.id)!.converted_task_id).toBeTruthy();
   });
 });
 
@@ -197,9 +164,7 @@ describe('Phase 4 — Suggestion API', () => {
     await daemon.start();
     baseUrl = `http://localhost:${daemon.port}`;
 
-    const tm = new TaskManager();
-    se = new SuggestionEngine(tm);
-    (daemon as any).apiServer.setTaskManager(tm);
+    se = new SuggestionEngine();
     (daemon as any).apiServer.setSuggestionEngine(se);
   });
 
@@ -217,12 +182,11 @@ describe('Phase 4 — Suggestion API', () => {
     expect(body.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('POST /api/suggestions/:id/convert → 创建任务', async () => {
-    const s = se.create({ category: 'general', summary: 'to convert', detail: 'd', evidence: [], confidence: 0.7, impact: 'low' });
-    const res = await fetch(`${baseUrl}/api/suggestions/${s.id}/convert`, { method: 'POST' });
-    expect(res.status).toBe(201);
+  it('POST /api/suggestions/:id/dismiss → 建议状态变为 rejected', async () => {
+    const s = se.create({ category: 'general', summary: 'to dismiss', detail: 'd', evidence: [], confidence: 0.7, impact: 'low' });
+    const res = await fetch(`${baseUrl}/api/suggestions/${s.id}/dismiss`, { method: 'POST' });
+    expect(res.status).toBe(200);
     const body = await res.json() as any;
-    expect(body.task_id).toBeTruthy();
-    expect(body.suggestion.status).toBe('converted');
+    expect(body.status).toBe('rejected');
   });
 });
