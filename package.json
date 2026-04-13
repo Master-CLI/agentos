@@ -3,6 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "description": "Project-level intelligent coordination system",
+  "license": "MIT",
+  "author": "Anonymous",
+  "homepage": "https://github.com/Master-CLI/agentos#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Master-CLI/agentos.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Master-CLI/agentos/issues"
+  },
   "workspaces": [
     "packages/cli",
     "packages/daemon",

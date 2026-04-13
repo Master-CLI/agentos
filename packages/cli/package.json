@@ -2,6 +2,17 @@
   "name": "@agentos/cli",
   "version": "0.1.0",
   "description": "AgentOS command-line interface",
+  "license": "MIT",
+  "author": "Anonymous",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Master-CLI/agentos.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/Master-CLI/agentos/issues"
+  },
+  "homepage": "https://github.com/Master-CLI/agentos#readme",
   "type": "module",
   "bin": {
     "agentos": "./dist/index.js"

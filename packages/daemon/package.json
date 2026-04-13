@@ -2,6 +2,17 @@
   "name": "@agentos/daemon",
   "version": "0.1.0",
   "description": "AgentOS daemon — observation, reasoning, and coordination engine",
+  "license": "MIT",
+  "author": "Anonymous",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Master-CLI/agentos.git",
+    "directory": "packages/daemon"
+  },
+  "bugs": {
+    "url": "https://github.com/Master-CLI/agentos/issues"
+  },
+  "homepage": "https://github.com/Master-CLI/agentos#readme",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

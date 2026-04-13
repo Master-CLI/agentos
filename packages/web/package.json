@@ -2,6 +2,18 @@
   "name": "@agentos/web",
   "version": "0.1.0",
   "description": "AgentOS web console",
+  "license": "MIT",
+  "author": "Anonymous",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Master-CLI/agentos.git",
+    "directory": "packages/web"
+  },
+  "bugs": {
+    "url": "https://github.com/Master-CLI/agentos/issues"
+  },
+  "homepage": "https://github.com/Master-CLI/agentos#readme",
   "type": "module",
   "scripts": {
     "dev": "vite",
