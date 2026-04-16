@@ -1,31 +1,31 @@
-import initSqlJs from 'sql.js';
-import type { Database } from 'sql.js';
+import Database, { type Database as DB } from 'better-sqlite3';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ulid } from 'ulid';
 import type { ProjectEvent } from './types.js';
 
+/**
+ * Append-only event log backed by better-sqlite3.
+ *
+ * Synchronous API — each append is flushed to disk by the SQLite engine (WAL).
+ * No full-file re-export per write (which is what sql.js forced us to do).
+ */
 export class EventStore {
-  private db!: Database;
-  private dbPath: string;
+  private db: DB;
+  private insertStmt: Database.Statement;
   private ready: Promise<void>;
 
   constructor(dbPath: string) {
-    this.dbPath = dbPath;
-    this.ready = this.init();
-  }
-
-  private async init(): Promise<void> {
-    const SQL = await initSqlJs();
-
-    if (fs.existsSync(this.dbPath)) {
-      const buffer = fs.readFileSync(this.dbPath);
-      this.db = new SQL.Database(buffer);
-    } else {
-      this.db = new SQL.Database();
+    const dir = path.dirname(dbPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
     }
 
-    this.db.run(`
+    this.db = new Database(dbPath);
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('synchronous = NORMAL');
+
+    this.db.exec(`
       CREATE TABLE IF NOT EXISTS events (
         id TEXT PRIMARY KEY,
         timestamp TEXT NOT NULL,
@@ -34,12 +34,18 @@ export class EventStore {
         payload TEXT NOT NULL,
         project_id TEXT NOT NULL,
         correlation_id TEXT
-      )
+      );
+      CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
+      CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_id);
     `);
-    this.db.run(`CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)`);
-    this.db.run(`CREATE INDEX IF NOT EXISTS idx_events_type ON events(type)`);
 
-    this.save();
+    this.insertStmt = this.db.prepare(
+      `INSERT INTO events (id, timestamp, source, type, payload, project_id, correlation_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+
+    this.ready = Promise.resolve();
   }
 
   async ensureReady(): Promise<void> {
@@ -53,25 +59,27 @@ export class EventStore {
       ...event,
     };
 
-    this.db.run(
-      `INSERT INTO events (id, timestamp, source, type, payload, project_id, correlation_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        full.id,
-        full.timestamp,
-        full.source,
-        full.type,
-        JSON.stringify(full.payload),
-        full.metadata.project_id,
-        full.metadata.correlation_id ?? null,
-      ],
+    this.insertStmt.run(
+      full.id,
+      full.timestamp,
+      full.source,
+      full.type,
+      JSON.stringify(full.payload),
+      full.metadata.project_id,
+      full.metadata.correlation_id ?? null,
     );
 
-    this.save();
     return full;
   }
 
-  query(opts: { from?: string; to?: string; type?: string; limit?: number }): ProjectEvent[] {
+  query(opts: {
+    from?: string;
+    to?: string;
+    type?: string;
+    types?: string[];
+    projectId?: string;
+    limit?: number;
+  }): ProjectEvent[] {
     const conditions: string[] = [];
     const params: (string | number)[] = [];
 
@@ -87,63 +95,55 @@ export class EventStore {
       conditions.push('type = ?');
       params.push(opts.type);
     }
+    if (opts.types && opts.types.length > 0) {
+      conditions.push(`type IN (${opts.types.map(() => '?').join(',')})`);
+      params.push(...opts.types);
+    }
+    if (opts.projectId) {
+      conditions.push('project_id = ?');
+      params.push(opts.projectId);
+    }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = opts.limit ? `LIMIT ${opts.limit}` : '';
 
-    const stmt = this.db.prepare(
+    const rows = this.db.prepare(
       `SELECT id, timestamp, source, type, payload, project_id, correlation_id
-       FROM events ${where} ORDER BY timestamp ASC ${limit}`
-    );
-    stmt.bind(params);
+       FROM events ${where} ORDER BY timestamp ASC ${limit}`,
+    ).all(...params) as Array<{
+      id: string;
+      timestamp: string;
+      source: string;
+      type: string;
+      payload: string;
+      project_id: string;
+      correlation_id: string | null;
+    }>;
 
-    const results: ProjectEvent[] = [];
-    while (stmt.step()) {
-      const row = stmt.getAsObject() as {
-        id: string;
-        timestamp: string;
-        source: string;
-        type: string;
-        payload: string;
-        project_id: string;
-        correlation_id: string | null;
-      };
-      results.push({
-        id: row.id,
-        timestamp: row.timestamp,
-        source: row.source,
-        type: row.type,
-        payload: JSON.parse(row.payload),
-        metadata: {
-          project_id: row.project_id,
-          correlation_id: row.correlation_id ?? undefined,
-        },
-      });
-    }
-    stmt.free();
-
-    return results;
+    return rows.map((row) => ({
+      id: row.id,
+      timestamp: row.timestamp,
+      source: row.source,
+      type: row.type,
+      payload: JSON.parse(row.payload),
+      metadata: {
+        project_id: row.project_id,
+        correlation_id: row.correlation_id ?? undefined,
+      },
+    }));
   }
 
   count(): number {
-    const stmt = this.db.prepare('SELECT COUNT(*) as cnt FROM events');
-    stmt.step();
-    const result = stmt.getAsObject() as { cnt: number };
-    stmt.free();
-    return result.cnt;
+    const row = this.db.prepare('SELECT COUNT(*) as cnt FROM events').get() as { cnt: number };
+    return row.cnt;
   }
 
+  /** @deprecated — kept for API compatibility; better-sqlite3 auto-persists via WAL. */
   save(): void {
-    const data = this.db.export();
-    const dir = path.dirname(this.dbPath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    fs.writeFileSync(this.dbPath, Buffer.from(data));
+    // no-op
   }
 
   close(): void {
-    this.save();
     this.db.close();
   }
 }

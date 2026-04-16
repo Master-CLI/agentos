@@ -8,6 +8,9 @@ import type { SuggestionEngine } from '../suggestions/suggestion-engine.js';
 import type { MetricsCollector } from '../telemetry/metrics-collector.js';
 import type { AuditLog } from '../telemetry/audit-log.js';
 import type { DialogHandler } from '../dialog/dialog-handler.js';
+import type { DesignTaskManager } from '../design-iteration/design-task-manager.js';
+import type { DesignPipeline } from '../design-iteration/design-pipeline.js';
+import { handleDesignRoute } from './design-routes.js';
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html',
@@ -34,6 +37,8 @@ export interface ApiServerOptions {
   eventBus: EventBus;
   dialogHandler?: DialogHandler;
   suggestionEngine?: SuggestionEngine;
+  designTaskManager?: DesignTaskManager;
+  designPipeline?: DesignPipeline;
   metricsCollector?: MetricsCollector;
   auditLog?: AuditLog;
   configPath?: string;
@@ -46,6 +51,8 @@ export class ApiServer {
   private eventBus: EventBus;
   private dialogHandler?: DialogHandler;
   private suggestionEngine?: SuggestionEngine;
+  private designTaskManager?: DesignTaskManager;
+  private designPipeline?: DesignPipeline;
   private metricsCollector?: MetricsCollector;
   private auditLog?: AuditLog;
   private configPath?: string;
@@ -55,6 +62,8 @@ export class ApiServer {
     this.eventBus = opts.eventBus;
     this.dialogHandler = opts.dialogHandler;
     this.suggestionEngine = opts.suggestionEngine;
+    this.designTaskManager = opts.designTaskManager;
+    this.designPipeline = opts.designPipeline;
     this.metricsCollector = opts.metricsCollector;
     this.auditLog = opts.auditLog;
     this.configPath = opts.configPath;
@@ -71,6 +80,8 @@ export class ApiServer {
 
   setDialogHandler(dh: DialogHandler): void { this.dialogHandler = dh; }
   setSuggestionEngine(se: SuggestionEngine): void { this.suggestionEngine = se; }
+  setDesignTaskManager(tm: DesignTaskManager): void { this.designTaskManager = tm; }
+  setDesignPipeline(dp: DesignPipeline): void { this.designPipeline = dp; }
   setMetricsCollector(mc: MetricsCollector): void { this.metricsCollector = mc; }
   setAuditLog(al: AuditLog): void { this.auditLog = al; }
   setConfigPath(p: string): void { this.configPath = p; }
@@ -219,6 +230,13 @@ export class ApiServer {
         return this.json(res, 404, { error: 'suggestion not found' });
       }
     }
+
+    // ── Design iteration routes ──
+    const designHandled = await handleDesignRoute(req, res, {
+      designTaskManager: this.designTaskManager,
+      designPipeline: this.designPipeline,
+    });
+    if (designHandled) return;
 
     // ── Static files (Web UI) ──
     const webDir = resolveWebDir();

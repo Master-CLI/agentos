@@ -65,21 +65,10 @@ export class DampingController {
       }
     }
 
-    // 2. Flow detection — developer is in a burst
-    const recentCommits = this.recentCommitTimestamps.filter(
-      (t) => t >= now - this.flowWindowMs
-    ).length;
-    if (recentCommits >= this.flowThreshold) {
-      return 'flow_active';
-    }
-    // Also suppress during quiet period after a burst
-    if (this.lastCommitTime > 0 && (now - this.lastCommitTime) < this.flowQuietMs) {
-      const commitsDuringWindow = this.recentCommitTimestamps.filter(
-        (t) => t >= this.lastCommitTime - this.flowWindowMs
-      ).length;
-      if (commitsDuringWindow >= this.flowThreshold) {
-        return 'flow_quiet_period';
-      }
+    // 2. Flow detection — developer is in a burst or quiet period after a burst
+    const flowState = this.isInFlowOrQuiet(now);
+    if (flowState !== null) {
+      return flowState;
     }
 
     // 3. Rate limiting
@@ -105,13 +94,34 @@ export class DampingController {
   }
 
   /**
-   * Check if developer is currently in flow state.
+   * Check if developer is currently in flow state (either an active burst
+   * or the quiet period following a burst).
    */
   isInFlow(): boolean {
-    const now = Date.now();
+    return this.isInFlowOrQuiet(Date.now()) !== null;
+  }
+
+  /**
+   * Shared flow judgement used by both `shouldSuppress` and `isInFlow`.
+   * Returns 'flow_active' when the instantaneous commit window meets the
+   * threshold, 'flow_quiet_period' when we're still within the quiet tail
+   * of a previous burst, or null when neither applies.
+   */
+  private isInFlowOrQuiet(now: number): 'flow_active' | 'flow_quiet_period' | null {
     const recentCommits = this.recentCommitTimestamps.filter(
       (t) => t >= now - this.flowWindowMs
     ).length;
-    return recentCommits >= this.flowThreshold;
+    if (recentCommits >= this.flowThreshold) {
+      return 'flow_active';
+    }
+    if (this.lastCommitTime > 0 && (now - this.lastCommitTime) < this.flowQuietMs) {
+      const commitsDuringWindow = this.recentCommitTimestamps.filter(
+        (t) => t >= this.lastCommitTime - this.flowWindowMs
+      ).length;
+      if (commitsDuringWindow >= this.flowThreshold) {
+        return 'flow_quiet_period';
+      }
+    }
+    return null;
   }
 }

@@ -1,14 +1,12 @@
 import { watch, type FSWatcher } from 'chokidar';
 import * as fs from 'node:fs';
-import * as path from 'node:path';
-import type { EventBus } from '../events/event-bus.js';
-import type { ProjectEvent } from '../events/types.js';
+import type { EmitEventFn } from '../events/types.js';
 import type { Observer } from './types.js';
 
 export interface FileWatcherOptions {
   projectDir: string;
   projectId: string;
-  eventBus: EventBus;
+  publishEvent: EmitEventFn;
   ignoredPatterns?: Array<string | RegExp>;
   debounceMs?: number;
 }
@@ -26,18 +24,20 @@ const DEFAULT_IGNORED: Array<string | RegExp> = [
   /\.db-journal$/,
 ];
 
+type PendingChange = { type: 'file_created' | 'file_modified' | 'file_deleted'; path: string };
+
 export class FileWatcher implements Observer {
   private watcher: FSWatcher | null = null;
-  private pendingBatch: Map<string, { type: string; path: string }> = new Map();
+  private pendingBatch: Map<string, PendingChange> = new Map();
   private batchTimer: ReturnType<typeof setTimeout> | null = null;
   private debounceMs: number;
-  private eventBus: EventBus;
+  private publishEvent: EmitEventFn;
   private projectDir: string;
   private projectId: string;
   private ignored: Array<string | RegExp>;
 
   constructor(opts: FileWatcherOptions) {
-    this.eventBus = opts.eventBus;
+    this.publishEvent = opts.publishEvent;
     this.projectDir = opts.projectDir;
     this.projectId = opts.projectId;
     this.ignored = opts.ignoredPatterns ?? DEFAULT_IGNORED;
@@ -66,7 +66,7 @@ export class FileWatcher implements Observer {
     this.watcher = null;
   }
 
-  private enqueue(type: string, filePath: string): void {
+  private enqueue(type: PendingChange['type'], filePath: string): void {
     this.pendingBatch.set(filePath, { type, path: filePath });
 
     if (this.batchTimer) {
@@ -81,25 +81,34 @@ export class FileWatcher implements Observer {
     this.batchTimer = null;
 
     for (const item of batch) {
-      let stat: fs.Stats | null = null;
-      try {
-        stat = fs.statSync(item.path);
-      } catch {
-        // File may have been deleted
+      const payload: Record<string, unknown> = { path: item.path };
+
+      if (item.type !== 'file_deleted') {
+        try {
+          const stat = fs.statSync(item.path);
+          payload.size = stat.size;
+          payload.mtime = stat.mtime.toISOString();
+        } catch {
+          // File vanished between the chokidar event and our stat — treat as delete.
+          this.publishEvent({
+            source: 'fs',
+            type: 'file_deleted',
+            payload: { path: item.path },
+            metadata: { project_id: this.projectId },
+          });
+          continue;
+        }
+      } else {
+        payload.size = null;
+        payload.mtime = null;
       }
 
-      const event: Omit<ProjectEvent, 'id' | 'timestamp'> = {
+      this.publishEvent({
         source: 'fs',
         type: item.type,
-        payload: {
-          path: item.path,
-          size: stat?.size ?? null,
-          mtime: stat?.mtime?.toISOString() ?? null,
-        },
+        payload,
         metadata: { project_id: this.projectId },
-      };
-
-      this.eventBus.publish(event as ProjectEvent);
+      });
     }
   }
 }

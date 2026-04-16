@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { EventBus } from './events/event-bus.js';
 import { EventStore } from './events/event-store.js';
+import type { EmitEventFn, ProjectEvent } from './events/types.js';
 import { ApiServer } from './api/server.js';
 import { FileWatcher } from './observers/file-watcher.js';
 import { GitObserver } from './observers/git-observer.js';
@@ -9,7 +10,6 @@ import { ReasoningRouter } from './reasoning/router.js';
 import { LocalLlmProvider } from './reasoning/local-llm.js';
 import { CliAgentProvider } from './reasoning/cli-agent.js';
 import { SnapshotEngine } from './state/snapshot-engine.js';
-import { detectModules } from './state/module-detector.js';
 import { DialogHandler } from './dialog/dialog-handler.js';
 import { SuggestionEngine } from './suggestions/suggestion-engine.js';
 import { ConfidenceCalibrator } from './trust/confidence-calibrator.js';
@@ -18,6 +18,8 @@ import { FeedbackTracker } from './trust/feedback-tracker.js';
 import { MetricsCollector } from './telemetry/metrics-collector.js';
 import { AuditLog } from './telemetry/audit-log.js';
 import { initialScan } from './observers/initial-scanner.js';
+import { DesignTaskManager } from './design-iteration/design-task-manager.js';
+import { DesignPipeline } from './design-iteration/design-pipeline.js';
 import type { Observer } from './observers/types.js';
 import type { ProviderName } from './reasoning/types.js';
 
@@ -25,6 +27,30 @@ export interface DaemonOptions {
   projectDir: string;
   port: number;
 }
+
+const PROJECT_ID = 'default';
+
+// Event types grouped by which manager owns them — used to filter the replay
+// stream so each manager sees only its own events.
+const SUGGESTION_EVENT_TYPES = ['suggestion_created', 'suggestion_status_changed'];
+const TASK_EVENT_TYPES = [
+  'task_created',
+  'task_status_changed',
+  'task_pipeline_updated',
+  'task_change_level_updated',
+];
+const DESIGN_EVENT_TYPES = [
+  'design_task_created',
+  'design_variant_added',
+  'design_renders_complete',
+  'design_ai_scored',
+  'design_human_reviewed',
+  'design_constraint_learned',
+  'design_awaiting_review',
+  'design_round_started',
+  'design_round_converged',
+  'design_task_completed',
+];
 
 export class Daemon {
   // Core
@@ -45,8 +71,10 @@ export class Daemon {
   // Dialog
   private dialogHandler: DialogHandler;
 
-  // Suggestions
+  // Managers (event-sourced)
   private suggestionEngine: SuggestionEngine;
+  private designTaskManager: DesignTaskManager;
+  private designPipeline: DesignPipeline;
 
   // Trust
   private confidenceCalibrator: ConfidenceCalibrator;
@@ -67,14 +95,18 @@ export class Daemon {
     this.eventBus = new EventBus();
     this.eventStore = new EventStore(path.join(this.agentosDir, 'events.db'));
 
+    const emit: EmitEventFn = (event) => this.appendAndPublish(event);
+
     // ── L3: Reasoning Router ──
     this.router = new ReasoningRouter();
 
     // ── L2: State ──
-    this.snapshotEngine = new SnapshotEngine('default', this.eventStore, this.eventBus);
+    this.snapshotEngine = new SnapshotEngine(PROJECT_ID, this.eventStore, this.eventBus);
 
-    // ── Suggestions ──
-    this.suggestionEngine = new SuggestionEngine();
+    // ── Managers (event-sourced) ──
+    this.suggestionEngine = new SuggestionEngine({ projectId: PROJECT_ID, emit });
+    this.designTaskManager = new DesignTaskManager({ projectId: PROJECT_ID, emit });
+    this.designPipeline = new DesignPipeline({ taskManager: this.designTaskManager });
 
     // ── Trust ──
     this.confidenceCalibrator = new ConfidenceCalibrator();
@@ -94,15 +126,23 @@ export class Daemon {
       eventBus: this.eventBus,
       dialogHandler: this.dialogHandler,
       suggestionEngine: this.suggestionEngine,
+      designTaskManager: this.designTaskManager,
+      designPipeline: this.designPipeline,
       metricsCollector: this.metricsCollector,
       auditLog: this.auditLog,
       configPath: path.join(this.agentosDir, 'config.json'),
     });
   }
 
-  appendAndPublish(event: Parameters<EventStore['append']>[0]): void {
+  /**
+   * The single event-ingress point.
+   * Persists the event to the store (stamping id + timestamp) and publishes
+   * the fully-populated event to the in-process bus.
+   */
+  appendAndPublish(event: Omit<ProjectEvent, 'id' | 'timestamp'>): ProjectEvent {
     const full = this.eventStore.append(event);
     this.eventBus.publish(full);
+    return full;
   }
 
   async start(): Promise<void> {
@@ -110,10 +150,13 @@ export class Daemon {
     await this.eventStore.ensureReady();
 
     // ── Initial scan (first start only — populates existing files + git history) ──
-    const scanned = await initialScan(this.opts.projectDir, this.eventStore, 'default');
+    const scanned = await initialScan(this.opts.projectDir, this.eventStore, PROJECT_ID);
     if (scanned > 0) {
       this.auditLog.record({ actor: 'system', action: 'initial_scan', target: `${scanned} items` });
     }
+
+    // ── Replay managers from persisted events ──
+    this.replayManagers();
 
     // ── Rebuild snapshot from persisted events ──
     await this.snapshotEngine.rebuild();
@@ -138,21 +181,13 @@ export class Daemon {
   }
 
   async stop(): Promise<void> {
-    // Stop observers
     for (const obs of this.observers) {
       await obs.stop();
     }
-
-    // Stop snapshot engine
     this.snapshotEngine.stop();
-
-    // Stop API server
     await this.apiServer.stop();
-
-    // Close event store
     this.eventStore.close();
 
-    // Remove PID file
     const pidPath = path.join(this.agentosDir, 'daemon.pid');
     if (fs.existsSync(pidPath)) {
       fs.unlinkSync(pidPath);
@@ -169,10 +204,26 @@ export class Daemon {
   getSnapshotEngine(): SnapshotEngine { return this.snapshotEngine; }
   getDialogHandler(): DialogHandler { return this.dialogHandler; }
   getSuggestionEngine(): SuggestionEngine { return this.suggestionEngine; }
+  getDesignTaskManager(): DesignTaskManager { return this.designTaskManager; }
+  getDesignPipeline(): DesignPipeline { return this.designPipeline; }
   getMetricsCollector(): MetricsCollector { return this.metricsCollector; }
   getAuditLog(): AuditLog { return this.auditLog; }
+  getFeedbackTracker(): FeedbackTracker { return this.feedbackTracker; }
+  getConfidenceCalibrator(): ConfidenceCalibrator { return this.confidenceCalibrator; }
+  getDampingController(): DampingController { return this.dampingController; }
 
   // ── Private setup methods ──
+
+  private replayManagers(): void {
+    // Load all past events once, then slice per manager — avoids N round-trips.
+    const allEvents = this.eventStore.query({ projectId: PROJECT_ID });
+
+    this.suggestionEngine.replay(allEvents.filter((e) => SUGGESTION_EVENT_TYPES.includes(e.type)));
+    this.designTaskManager.replay(allEvents.filter((e) => DESIGN_EVENT_TYPES.includes(e.type)));
+    // Replay the TaskManager once it owns a CodeTask pipeline instance wired via
+    // the ReviewPipeline integration path.
+    void TASK_EVENT_TYPES;
+  }
 
   private async registerProviders(): Promise<void> {
     // Local LLM (Watchdog)
@@ -198,35 +249,26 @@ export class Daemon {
   }
 
   private startObservers(): void {
-    const projectId = 'default';
+    const publishEvent: EmitEventFn = (event) => this.appendAndPublish(event);
 
-    // FileWatcher
     const fw = new FileWatcher({
       projectDir: this.opts.projectDir,
-      projectId,
-      eventBus: this.eventBus,
+      projectId: PROJECT_ID,
+      publishEvent,
     });
     fw.start();
     this.observers.push(fw);
 
-    // GitObserver
     const go = new GitObserver({
       projectDir: this.opts.projectDir,
-      projectId,
-      eventBus: this.eventBus,
+      projectId: PROJECT_ID,
+      publishEvent,
     });
     go.start();
     this.observers.push(go);
   }
 
   private wireEventHandlers(): void {
-    // Persist all bus events to store
-    this.eventBus.subscribe((event) => {
-      if (!event.id) {
-        this.eventStore.append(event);
-      }
-    });
-
     // Track git commits for flow detection (damping)
     this.eventBus.subscribe((event) => {
       if (event.type === 'commit_pushed') {
@@ -234,7 +276,28 @@ export class Daemon {
       }
     });
 
-    // Auto-generate suggestions from significant events
+    // Trust feedback loop: rejected suggestions → FeedbackTracker + calibrator.
+    this.eventBus.subscribe((event) => {
+      if (event.type !== 'suggestion_status_changed') return;
+      const id = event.payload.id as string | undefined;
+      const status = event.payload.status as string | undefined;
+      if (!id || !status) return;
+      const suggestion = this.suggestionEngine.get(id);
+      if (!suggestion) return;
+      if (status === 'rejected') {
+        this.feedbackTracker.record({
+          type: 'suggestion_rejected',
+          source_id: id,
+          category: suggestion.category,
+          user_action: 'reject',
+        });
+        this.confidenceCalibrator.record(suggestion.category, false);
+      } else if (status === 'accepted' || status === 'converted') {
+        this.confidenceCalibrator.record(suggestion.category, true);
+      }
+    });
+
+    // Auto-generate suggestions from significant events.
     this.eventBus.subscribe((event) => {
       this.tryGenerateSuggestion(event);
     });
@@ -243,7 +306,7 @@ export class Daemon {
   /**
    * Analyze events and auto-generate suggestions when patterns are detected.
    */
-  private tryGenerateSuggestion(event: import('./events/types.js').ProjectEvent): void {
+  private tryGenerateSuggestion(event: ProjectEvent): void {
     // Don't suggest during flow state
     if (this.dampingController.isInFlow()) return;
 

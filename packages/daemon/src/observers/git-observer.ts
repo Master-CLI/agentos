@@ -1,18 +1,17 @@
 import { simpleGit, type SimpleGit, type LogResult } from 'simple-git';
-import type { EventBus } from '../events/event-bus.js';
-import type { ProjectEvent } from '../events/types.js';
+import type { EmitEventFn } from '../events/types.js';
 import type { Observer } from './types.js';
 
 export interface GitObserverOptions {
   projectDir: string;
   projectId: string;
-  eventBus: EventBus;
+  publishEvent: EmitEventFn;
   pollIntervalMs?: number;
 }
 
 export class GitObserver implements Observer {
   private git: SimpleGit;
-  private eventBus: EventBus;
+  private publishEvent: EmitEventFn;
   private projectId: string;
   private pollInterval: number;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -21,13 +20,12 @@ export class GitObserver implements Observer {
 
   constructor(opts: GitObserverOptions) {
     this.git = simpleGit(opts.projectDir);
-    this.eventBus = opts.eventBus;
+    this.publishEvent = opts.publishEvent;
     this.projectId = opts.projectId;
     this.pollInterval = opts.pollIntervalMs ?? 3000;
   }
 
   start(): void {
-    // Initialize: snapshot current state
     this.snapshot().then(() => {
       this.timer = setInterval(() => this.poll(), this.pollInterval);
     }).catch(() => {
@@ -71,14 +69,12 @@ export class GitObserver implements Observer {
     if (!log.latest) return;
 
     if (this.lastCommitHash && log.latest.hash !== this.lastCommitHash) {
-      // Find new commits
       const newCommits = [];
       for (const entry of log.all) {
         if (entry.hash === this.lastCommitHash) break;
         newCommits.push(entry);
       }
 
-      // Emit in chronological order (oldest first)
       for (const commit of newCommits.reverse()) {
         let filesChanged: string[] = [];
         try {
@@ -88,7 +84,7 @@ export class GitObserver implements Observer {
           // First commit has no parent
         }
 
-        const event: Omit<ProjectEvent, 'id' | 'timestamp'> = {
+        this.publishEvent({
           source: 'git',
           type: 'commit_pushed',
           payload: {
@@ -99,8 +95,7 @@ export class GitObserver implements Observer {
             files_changed: filesChanged,
           },
           metadata: { project_id: this.projectId },
-        };
-        this.eventBus.publish(event as ProjectEvent);
+        });
       }
     }
 
@@ -112,13 +107,12 @@ export class GitObserver implements Observer {
     for (const name of branches.all) {
       if (!this.knownBranches.has(name)) {
         this.knownBranches.add(name);
-        const event: Omit<ProjectEvent, 'id' | 'timestamp'> = {
+        this.publishEvent({
           source: 'git',
           type: 'branch_created',
           payload: { branch: name },
           metadata: { project_id: this.projectId },
-        };
-        this.eventBus.publish(event as ProjectEvent);
+        });
       }
     }
   }

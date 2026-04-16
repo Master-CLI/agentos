@@ -50,6 +50,8 @@ export interface TaskPipeline {
   reviews: ReviewReport[];
   consensus: 'pending' | 'pass' | 'concerns' | 'reject';
   fix_attempts: number;
+  /** Populated when the pipeline aborts with an unrecoverable error. */
+  error?: string;
 }
 
 export interface CodeTask {

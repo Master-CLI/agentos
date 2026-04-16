@@ -3,13 +3,27 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execSync } from 'node:child_process';
+import { ulid } from 'ulid';
 import { EventBus } from '../src/events/event-bus.js';
 import { FileWatcher } from '../src/observers/file-watcher.js';
 import { GitObserver } from '../src/observers/git-observer.js';
 import { Daemon } from '../src/daemon.js';
-import type { ProjectEvent } from '../src/events/types.js';
+import type { ProjectEvent, EmitEventFn } from '../src/events/types.js';
 import WebSocket from 'ws';
 import { safeRmSync } from './helpers.js';
+
+/**
+ * Test shim: stamps id/timestamp and pipes the event directly onto the bus,
+ * mimicking what Daemon.appendAndPublish does in production without needing a
+ * real event store.
+ */
+function makeBusEmitter(bus: EventBus): EmitEventFn {
+  return (event) => {
+    const full: ProjectEvent = { ...event, id: ulid(), timestamp: new Date().toISOString() };
+    bus.publish(full);
+    return full;
+  };
+}
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'agentos-p1-'));
@@ -52,7 +66,7 @@ describe('Phase 1 — FileWatcher', () => {
     watcher = new FileWatcher({
       projectDir: dir,
       projectId: 'test',
-      eventBus: bus,
+      publishEvent: makeBusEmitter(bus),
       debounceMs: 100,
     });
     watcher.start();
@@ -128,7 +142,7 @@ describe('Phase 1 — 事件去噪', () => {
     watcher = new FileWatcher({
       projectDir: dir,
       projectId: 'test',
-      eventBus: bus,
+      publishEvent: makeBusEmitter(bus),
       debounceMs: 100,
     });
     watcher.start();
@@ -194,7 +208,7 @@ describe('Phase 1 — GitObserver', () => {
     observer = new GitObserver({
       projectDir: dir,
       projectId: 'test',
-      eventBus: bus,
+      publishEvent: makeBusEmitter(bus),
       pollIntervalMs: 500,
     });
     observer.start();

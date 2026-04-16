@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import type { ReasoningRouter } from '../reasoning/router.js';
 import type { ProviderName, OutputCallback } from '../reasoning/types.js';
 import type { TaskManager } from './task-manager.js';
@@ -17,7 +18,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   return Promise.race([
     promise,
     new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms),
     ),
   ]);
 }
@@ -25,6 +26,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 /**
  * Orchestrates the implement → test → review pipeline,
  * ensuring each stage uses a different provider.
+ *
+ * Supports a fix-loop: if reviewers reject or flag error-severity concerns,
+ * the pipeline re-invokes the implementer with the concerns appended, and
+ * re-runs testing + review. Up to `MAX_FIX_ATTEMPTS` retries.
  */
 export class ReviewPipeline {
   private router: ReasoningRouter;
@@ -47,8 +52,7 @@ export class ReviewPipeline {
   }
 
   /**
-   * Run the full pipeline for a task.
-   * Returns the updated task.
+   * Run the full pipeline for a task. Returns the updated task.
    */
   async execute(taskId: string): Promise<CodeTask> {
     const task = this.taskManager.get(taskId);
@@ -57,10 +61,9 @@ export class ReviewPipeline {
     try {
       return await this.executeStages(taskId, task);
     } catch (err) {
-      // On any failure, mark error in pipeline and move to awaiting_user
       const errorMsg = err instanceof Error ? err.message : String(err);
       this.taskManager.updatePipeline(taskId, (p) => {
-        (p as any).error = errorMsg;
+        p.error = errorMsg;
       });
       this.taskManager.updateStatus(taskId, 'awaiting_user');
       return this.taskManager.get(taskId)!;
@@ -68,51 +71,110 @@ export class ReviewPipeline {
   }
 
   private async executeStages(taskId: string, task: CodeTask): Promise<CodeTask> {
-    // Pick 3 distinct providers for implement, test, review
     const providers = this.allocateProviders(task.change_level);
 
-    // ── Stage 1: Implementation ──
+    let diffs: FileDiff[] = [];
+    let priorConcerns: ReviewConcern[] = [];
+
+    for (let attempt = 0; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
+      if (attempt > 0) {
+        this.taskManager.updatePipeline(taskId, (p) => {
+          p.fix_attempts = attempt;
+          // Fresh review slate for the new diff — old reviews describe a
+          // now-discarded implementation. Callers can replay the event log if
+          // they need per-attempt history.
+          p.reviews = [];
+          p.consensus = 'pending';
+        });
+      }
+
+      diffs = await this.runImplementation(taskId, task, providers.implementer, priorConcerns);
+
+      // Re-classify once per implementation pass.
+      const level = classifyChangeLevel(diffs, task.context.related_modules.length);
+      if (level !== task.change_level) {
+        this.taskManager.updateChangeLevel(taskId, level);
+      }
+
+      await this.runTesting(taskId, diffs, providers.tester);
+
+      await this.runReviews(taskId, diffs, providers, task.change_level);
+
+      const current = this.taskManager.get(taskId)!;
+      const consensus = this.computeConsensus(current.pipeline.reviews);
+      this.taskManager.updatePipeline(taskId, (p) => { p.consensus = consensus; });
+
+      const needsFix = consensus === 'reject' || this.hasErrorConcerns(current.pipeline.reviews);
+      if (!needsFix) break;
+      if (attempt >= MAX_FIX_ATTEMPTS) break;
+
+      priorConcerns = current.pipeline.reviews.flatMap((r) => r.concerns);
+    }
+
+    this.taskManager.updateStatus(taskId, 'awaiting_user');
+    return this.taskManager.get(taskId)!;
+  }
+
+  private async runImplementation(
+    taskId: string,
+    task: CodeTask,
+    implementer: ProviderName,
+    priorConcerns: ReviewConcern[],
+  ): Promise<FileDiff[]> {
     this.taskManager.updateStatus(taskId, 'implementing');
     this.taskManager.updatePipeline(taskId, (p) => {
-      p.implementation.provider = providers.implementer;
+      p.implementation.provider = implementer;
       p.implementation.started_at = new Date().toISOString();
+      p.implementation.completed_at = null;
+      p.implementation.diff = [];
     });
+
+    const basePrompt =
+      `Implement the following request. Return a JSON object with a "files" array, ` +
+      `each with "path" (relative, no ".." or leading "/"), "additions", "deletions", "content" fields.\n\n` +
+      `Request: ${task.prompt}`;
+
+    const prompt = priorConcerns.length === 0
+      ? basePrompt
+      : basePrompt +
+        `\n\nThe previous attempt was rejected by reviewers. Address these concerns:\n` +
+        priorConcerns.slice(0, 20)
+          .map((c, i) => `${i + 1}. [${c.severity}/${c.category}] ${c.file}${c.line ? `:${c.line}` : ''} — ${c.message}${c.suggested_fix ? ` (suggested: ${c.suggested_fix})` : ''}`)
+          .join('\n');
 
     const implResult = await withTimeout(
       this.router.execute({
         type: 'architect',
-        prompt: `Implement the following request. Return a JSON object with a "files" array, each with "path", "additions", "deletions", "content" fields.\n\nRequest: ${task.prompt}`,
+        prompt,
         context: `Project: ${task.context.project_id}, Modules: ${task.context.related_modules.join(', ')}`,
-        onOutput: this.makeOutputCb(taskId, providers.implementer, 'implement'),
+        onOutput: this.makeOutputCb(taskId, implementer, 'implement'),
       }),
       this.stageTimeoutMs,
       'Implementation',
     );
 
     const diffs = this.parseDiffs(implResult.output, implResult.structured);
-    const level = classifyChangeLevel(diffs, task.context.related_modules.length);
-
     this.taskManager.updatePipeline(taskId, (p) => {
       p.implementation.diff = diffs;
       p.implementation.completed_at = new Date().toISOString();
     });
+    return diffs;
+  }
 
-    // Update change level if auto-detected differently
-    if (level !== task.change_level) {
-      task.change_level = level;
-    }
-
-    // ── Stage 2: Test generation ──
+  private async runTesting(taskId: string, diffs: FileDiff[], tester: ProviderName): Promise<void> {
     this.taskManager.updateStatus(taskId, 'testing');
     this.taskManager.updatePipeline(taskId, (p) => {
-      p.testing.provider = providers.tester;
+      p.testing.provider = tester;
     });
 
     const testResult = await withTimeout(
       this.router.execute({
         type: 'architect',
-        prompt: `Write tests for the following code changes. Return a JSON object with "test_files" (array of filenames) and "passed" (boolean), "total" and "failed" (numbers).\n\nChanges:\n${JSON.stringify(diffs)}`,
-        onOutput: this.makeOutputCb(taskId, providers.tester, 'test'),
+        prompt:
+          `Write tests for the following code changes. Return a JSON object with ` +
+          `"test_files" (array of filenames) and "passed" (boolean), "total" and "failed" (numbers).\n\n` +
+          `Changes:\n${JSON.stringify(diffs)}`,
+        onOutput: this.makeOutputCb(taskId, tester, 'test'),
       }),
       this.stageTimeoutMs,
       'Testing',
@@ -123,13 +185,18 @@ export class ReviewPipeline {
       p.testing.test_files = testData.test_files;
       p.testing.run_result = { passed: testData.passed, total: testData.total, failed: testData.failed };
     });
+  }
 
-    // ── Stage 3: Review ──
+  private async runReviews(
+    taskId: string,
+    diffs: FileDiff[],
+    providers: ReturnType<ReviewPipeline['allocateProviders']>,
+    level: ChangeLevel,
+  ): Promise<void> {
     this.taskManager.updateStatus(taskId, 'reviewing');
 
-    const reviewCount = level === 'major' ? 2 : 1;
-    const reviewers = [providers.reviewer];
-    if (reviewCount === 2 && providers.secondReviewer) {
+    const reviewers: ProviderName[] = [providers.reviewer];
+    if (level === 'major' && providers.secondReviewer) {
       reviewers.push(providers.secondReviewer);
     }
 
@@ -137,7 +204,11 @@ export class ReviewPipeline {
       const reviewResult = await withTimeout(
         this.router.execute({
           type: 'diagnose',
-          prompt: `Review the following code changes for issues. Return JSON with "verdict" (approve/request_changes/reject) and "concerns" array (each with file, severity, category, message).\n\nChanges:\n${JSON.stringify(diffs)}`,
+          prompt:
+            `Review the following code changes for issues. ` +
+            `Return JSON with "verdict" (approve/request_changes/reject) and ` +
+            `"concerns" array (each with file, severity, category, message).\n\n` +
+            `Changes:\n${JSON.stringify(diffs)}`,
           onOutput: this.makeOutputCb(taskId, reviewer, 'review'),
         }),
         this.stageTimeoutMs,
@@ -149,27 +220,6 @@ export class ReviewPipeline {
         p.reviews.push(report);
       });
     }
-
-    // ── Compute consensus ──
-    const updatedTask = this.taskManager.get(taskId)!;
-    const consensus = this.computeConsensus(updatedTask.pipeline.reviews);
-    this.taskManager.updatePipeline(taskId, (p) => {
-      p.consensus = consensus;
-    });
-
-    // ── Auto-fix if needed ──
-    if (consensus === 'reject' || this.hasErrorConcerns(updatedTask.pipeline.reviews)) {
-      if (updatedTask.pipeline.fix_attempts < MAX_FIX_ATTEMPTS) {
-        this.taskManager.updatePipeline(taskId, (p) => {
-          p.fix_attempts++;
-        });
-        // In a real implementation, this would re-invoke the implementer with the concerns
-        // For now, just mark it and move to awaiting_user
-      }
-    }
-
-    this.taskManager.updateStatus(taskId, 'awaiting_user');
-    return this.taskManager.get(taskId)!;
   }
 
   /**
@@ -189,74 +239,81 @@ export class ReviewPipeline {
       throw new Error('No CLI agent providers available for pipeline execution');
     }
 
-    // If only 1 provider available, use it for everything (degraded mode)
     if (available.length === 1) {
-      return {
-        implementer: available[0],
-        tester: available[0],
-        reviewer: available[0],
-      };
+      return { implementer: available[0], tester: available[0], reviewer: available[0] };
     }
 
-    // 2 providers: split implement vs test+review
     if (available.length === 2) {
-      return {
-        implementer: available[0],
-        tester: available[1],
-        reviewer: available[1],
-      };
+      return { implementer: available[0], tester: available[1], reviewer: available[1] };
     }
 
-    // 3+ providers: full separation
     const result: ReturnType<ReviewPipeline['allocateProviders']> = {
       implementer: available[0],
       tester: available[1],
       reviewer: available[2],
     };
 
-    // For major changes, add second reviewer
     if (level === 'major' && available.length >= 3) {
       result.secondReviewer = available[1]; // Tester doubles as second reviewer
     }
-
     return result;
   }
 
+  /**
+   * Parse file diffs out of an LLM response.
+   *
+   * Validates every extracted path so we never stage writes into `..` or
+   * absolute paths. If nothing valid is found, returns an empty array —
+   * callers see "no implementation" rather than a fake `response.md`.
+   */
   private parseDiffs(output: string, structured?: Record<string, unknown>): FileDiff[] {
-    if (structured && Array.isArray((structured as any).files)) {
-      return (structured as any).files;
+    const candidates: FileDiff[] = [];
+
+    if (structured && Array.isArray((structured as { files?: unknown[] }).files)) {
+      for (const raw of (structured as { files: unknown[] }).files) {
+        if (!raw || typeof raw !== 'object') continue;
+        const f = raw as Partial<FileDiff>;
+        if (typeof f.path !== 'string' || typeof f.content !== 'string') continue;
+        candidates.push({
+          path: f.path,
+          content: f.content,
+          additions: typeof f.additions === 'number' ? f.additions : f.content.split('\n').length,
+          deletions: typeof f.deletions === 'number' ? f.deletions : 0,
+        });
+      }
     }
 
-    // Try to extract fenced code blocks with file names
-    const files: FileDiff[] = [];
-    const blockRegex = /```(?:\w+)?\s*\n([\s\S]*?)```/g;
-    const fileHintRegex = /(?:\/\/|#)\s*(?:file:\s*)?(\S+\.\w+)/;
-    let match;
-    while ((match = blockRegex.exec(output)) !== null) {
-      const code = match[1].trim();
-      const lines = code.split('\n');
-      // Try to find a file name hint in the line before the code block
-      const beforeBlock = output.slice(Math.max(0, match.index - 200), match.index);
-      const fileMatch = beforeBlock.match(/`([^`]+\.\w+)`/) || beforeBlock.match(/(\S+\.\w+)\s*[:：]?\s*$/) || lines[0].match(fileHintRegex);
-      const fileName = fileMatch ? fileMatch[1] : `file${files.length + 1}.ts`;
-
-      files.push({
-        path: fileName,
-        additions: lines.length,
-        deletions: 0,
-        content: code,
-      });
+    if (candidates.length === 0) {
+      // Try to extract fenced code blocks with file name hints.
+      const blockRegex = /```(?:\w+)?\s*\n([\s\S]*?)```/g;
+      const fileHintRegex = /(?:\/\/|#)\s*(?:file:\s*)?(\S+\.\w+)/;
+      let match: RegExpExecArray | null;
+      while ((match = blockRegex.exec(output)) !== null) {
+        const code = match[1].trim();
+        const lines = code.split('\n');
+        const beforeBlock = output.slice(Math.max(0, match.index - 200), match.index);
+        const hint =
+          beforeBlock.match(/`([^`]+\.\w+)`/)?.[1]
+          ?? beforeBlock.match(/(\S+\.\w+)\s*[:：]?\s*$/)?.[1]
+          ?? lines[0].match(fileHintRegex)?.[1];
+        if (!hint) continue;
+        candidates.push({
+          path: hint,
+          additions: lines.length,
+          deletions: 0,
+          content: code,
+        });
+      }
     }
 
-    if (files.length > 0) return files;
-
-    // Final fallback: treat entire output as a single response
-    return [{
-      path: 'response.md',
-      additions: output.split('\n').length,
-      deletions: 0,
-      content: output,
-    }];
+    // Validate every path; silently drop unsafe ones.
+    const safe: FileDiff[] = [];
+    for (const candidate of candidates) {
+      const safePath = sanitizeRelativePath(candidate.path);
+      if (!safePath) continue;
+      safe.push({ ...candidate, path: safePath });
+    }
+    return safe;
   }
 
   private parseTestResult(output: string, structured?: Record<string, unknown>): {
@@ -265,14 +322,16 @@ export class ReviewPipeline {
     total: number;
     failed: number;
   } {
-    if (structured && typeof (structured as any).passed === 'boolean') {
+    if (structured && typeof (structured as Record<string, unknown>).passed === 'boolean') {
+      const s = structured as { test_files?: unknown; passed: boolean; total?: unknown; failed?: unknown };
       return {
-        test_files: (structured as any).test_files ?? ['test.ts'],
-        passed: (structured as any).passed,
-        total: (structured as any).total ?? 1,
-        failed: (structured as any).failed ?? 0,
+        test_files: Array.isArray(s.test_files) ? s.test_files.filter((x): x is string => typeof x === 'string') : ['test.ts'],
+        passed: s.passed,
+        total: typeof s.total === 'number' ? s.total : 1,
+        failed: typeof s.failed === 'number' ? s.failed : 0,
       };
     }
+    void output;
     return { test_files: ['test.ts'], passed: true, total: 1, failed: 0 };
   }
 
@@ -282,22 +341,18 @@ export class ReviewPipeline {
     structured?: Record<string, unknown>,
   ): ReviewReport {
     const now = new Date().toISOString();
-    if (structured && typeof (structured as any).verdict === 'string') {
+    if (structured && typeof (structured as Record<string, unknown>).verdict === 'string') {
+      const s = structured as { verdict: ReviewReport['verdict']; concerns?: unknown };
       return {
         reviewer,
-        verdict: (structured as any).verdict,
-        concerns: (structured as any).concerns ?? [],
+        verdict: s.verdict,
+        concerns: Array.isArray(s.concerns) ? (s.concerns as ReviewConcern[]) : [],
         started_at: now,
         completed_at: now,
       };
     }
-    return {
-      reviewer,
-      verdict: 'approve',
-      concerns: [],
-      started_at: now,
-      completed_at: now,
-    };
+    void output;
+    return { reviewer, verdict: 'approve', concerns: [], started_at: now, completed_at: now };
   }
 
   private computeConsensus(reviews: ReviewReport[]): 'pending' | 'pass' | 'concerns' | 'reject' {
@@ -310,4 +365,22 @@ export class ReviewPipeline {
   private hasErrorConcerns(reviews: ReviewReport[]): boolean {
     return reviews.some((r) => r.concerns.some((c) => c.severity === 'error'));
   }
+}
+
+/**
+ * Normalize and guard a candidate output path. Returns null if unsafe —
+ * absolute paths, drive letters, and anything that escapes the project root
+ * are rejected.
+ */
+function sanitizeRelativePath(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (path.isAbsolute(trimmed)) return null;
+  // Windows drive letter or UNC even on posix tooling
+  if (/^[a-zA-Z]:/.test(trimmed) || trimmed.startsWith('\\\\')) return null;
+
+  const normalized = path.posix.normalize(trimmed.replaceAll('\\', '/'));
+  if (normalized.startsWith('..') || normalized.includes('/../') || normalized === '..') return null;
+  if (normalized.startsWith('/')) return null;
+  return normalized;
 }
