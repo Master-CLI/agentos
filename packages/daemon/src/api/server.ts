@@ -10,7 +10,11 @@ import type { AuditLog } from '../telemetry/audit-log.js';
 import type { DialogHandler } from '../dialog/dialog-handler.js';
 import type { DesignTaskManager } from '../design-iteration/design-task-manager.js';
 import type { DesignPipeline } from '../design-iteration/design-pipeline.js';
+import type { InitiativeManager } from '../initiatives/manager.js';
+import type { RetrospectiveEngine } from '../retrospectives/engine.js';
 import { handleDesignRoute } from './design-routes.js';
+import { handleInitiativeRoute } from './initiative-routes.js';
+import { handleRetrospectiveRoute } from './retrospective-routes.js';
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html',
@@ -39,6 +43,8 @@ export interface ApiServerOptions {
   suggestionEngine?: SuggestionEngine;
   designTaskManager?: DesignTaskManager;
   designPipeline?: DesignPipeline;
+  initiativeManager?: InitiativeManager;
+  retrospectiveEngine?: RetrospectiveEngine;
   metricsCollector?: MetricsCollector;
   auditLog?: AuditLog;
   configPath?: string;
@@ -53,6 +59,8 @@ export class ApiServer {
   private suggestionEngine?: SuggestionEngine;
   private designTaskManager?: DesignTaskManager;
   private designPipeline?: DesignPipeline;
+  private initiativeManager?: InitiativeManager;
+  private retrospectiveEngine?: RetrospectiveEngine;
   private metricsCollector?: MetricsCollector;
   private auditLog?: AuditLog;
   private configPath?: string;
@@ -64,6 +72,8 @@ export class ApiServer {
     this.suggestionEngine = opts.suggestionEngine;
     this.designTaskManager = opts.designTaskManager;
     this.designPipeline = opts.designPipeline;
+    this.initiativeManager = opts.initiativeManager;
+    this.retrospectiveEngine = opts.retrospectiveEngine;
     this.metricsCollector = opts.metricsCollector;
     this.auditLog = opts.auditLog;
     this.configPath = opts.configPath;
@@ -82,6 +92,8 @@ export class ApiServer {
   setSuggestionEngine(se: SuggestionEngine): void { this.suggestionEngine = se; }
   setDesignTaskManager(tm: DesignTaskManager): void { this.designTaskManager = tm; }
   setDesignPipeline(dp: DesignPipeline): void { this.designPipeline = dp; }
+  setInitiativeManager(im: InitiativeManager): void { this.initiativeManager = im; }
+  setRetrospectiveEngine(re: RetrospectiveEngine): void { this.retrospectiveEngine = re; }
   setMetricsCollector(mc: MetricsCollector): void { this.metricsCollector = mc; }
   setAuditLog(al: AuditLog): void { this.auditLog = al; }
   setConfigPath(p: string): void { this.configPath = p; }
@@ -237,6 +249,18 @@ export class ApiServer {
       designPipeline: this.designPipeline,
     });
     if (designHandled) return;
+
+    // ── Initiative routes ──
+    const initiativeHandled = await handleInitiativeRoute(req, res, {
+      initiativeManager: this.initiativeManager,
+    });
+    if (initiativeHandled) return;
+
+    // ── Retrospective routes ──
+    const retrospectiveHandled = await handleRetrospectiveRoute(req, res, {
+      retrospectiveEngine: this.retrospectiveEngine,
+    });
+    if (retrospectiveHandled) return;
 
     // ── Static files (Web UI) ──
     const webDir = resolveWebDir();

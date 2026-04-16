@@ -2,6 +2,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execSync } from 'node:child_process';
+import type { ScaffoldMode } from './scaffold-docs.js';
+
+export interface InitOptions {
+  modes?: ScaffoldMode[];
+}
 
 /**
  * Pick a unique port based on existing registered projects.
@@ -62,7 +67,7 @@ function detectOllama(): { available: boolean; version: string | null } {
   }
 }
 
-export async function initProject(targetDir: string): Promise<void> {
+export async function initProject(targetDir: string, options: InitOptions = {}): Promise<void> {
   const agentosDir = path.join(targetDir, '.agentos');
 
   if (fs.existsSync(agentosDir)) {
@@ -157,12 +162,15 @@ export async function initProject(targetDir: string): Promise<void> {
   console.log(`  Ollama:     ${report.environment.ollama}`);
   console.log(`  CLI Agents: ${report.environment.cli_agents}`);
 
-  // Scaffold documentation system (CLAUDE.md + docs/ structure)
+  // Scaffold documentation system (CLAUDE.md + optional docs/ structure)
   try {
     const { scaffoldDocs } = await import('./scaffold-docs.js');
-    scaffoldDocs(targetDir);
-    console.log('  Docs:       docs/ structure + CLAUDE.md created');
-  } catch { /* ignore */ }
+    scaffoldDocs(targetDir, { modes: options.modes });
+    const modeLabel = (options.modes ?? ['documentation']).join(',');
+    console.log(`  Docs:       CLAUDE.md (${modeLabel}) + docs/ scaffolded`);
+  } catch (err) {
+    console.error('  Docs:       failed to scaffold —', err instanceof Error ? err.message : err);
+  }
 
   // Register in global project list (skip temp directories from tests)
   const isTempDir = targetDir.includes(os.tmpdir()) || targetDir.includes('\\Temp\\') || targetDir.includes('/tmp/');

@@ -12,9 +12,16 @@ export function createProgram(): Command {
     .command('init')
     .description('Initialize AgentOS in the current project')
     .option('--target <dir>', 'Target directory (defaults to cwd)')
+    .option(
+      '--mode <modes>',
+      'Comma-separated CLAUDE.md template modes: documentation,parallel,event-sourcing,multi-provider,all',
+      'documentation',
+    )
     .action(async (opts) => {
       const { initProject } = await import('./commands/init.js');
-      await initProject(opts.target || process.cwd());
+      const { parseModes } = await import('./commands/scaffold-docs.js');
+      const modes = parseModes(opts.mode);
+      await initProject(opts.target || process.cwd(), { modes });
     });
 
   program

@@ -13,4 +13,5 @@ export interface Suggestion {
   status: SuggestionStatus;
   converted_task_id?: string;
   region?: string;           // For cooldown tracking — which area of code this targets
+  initiative_id?: string;    // Optional: which Initiative this suggestion supports
 }

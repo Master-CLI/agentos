@@ -1,7 +1,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const DIRS = [
+const DOC_DIRS = [
   'docs',
   'docs/concepts',
   'docs/goals',
@@ -11,19 +12,63 @@ const DIRS = [
   'docs/decisions',
 ];
 
-export function scaffoldDocs(targetDir: string): void {
-  // Create directories
-  for (const dir of DIRS) {
-    const fullPath = path.join(targetDir, dir);
-    if (!fs.existsSync(fullPath)) {
-      fs.mkdirSync(fullPath, { recursive: true });
-    }
-  }
+/** Template snippets that can be opted into at init time. */
+export const AVAILABLE_MODES = [
+  'documentation',
+  'parallel',
+  'event-sourcing',
+  'multi-provider',
+] as const;
 
-  // INDEX.md
-  const indexPath = path.join(targetDir, 'docs', 'INDEX.md');
-  if (!fs.existsSync(indexPath)) {
-    fs.writeFileSync(indexPath, `# Project Documentation Index
+export type ScaffoldMode = (typeof AVAILABLE_MODES)[number];
+
+export interface ScaffoldOptions {
+  /**
+   * Which template snippets to embed in CLAUDE.md. `core.md` is always included.
+   * Defaults to `['documentation']` to preserve historical behavior for callers
+   * that don't pass modes.
+   */
+  modes?: ScaffoldMode[];
+}
+
+/**
+ * Resolve the absolute path of the shipped templates/ directory.
+ * Works whether called from dist/ (production) or a test that points directly
+ * at the built file.
+ */
+function resolveTemplatesDir(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  // From packages/cli/dist/commands/scaffold-docs.js → packages/cli/templates
+  const candidate = path.resolve(here, '..', '..', 'templates');
+  if (fs.existsSync(candidate)) return candidate;
+  // Fallback for running from src/ in dev
+  const fallback = path.resolve(here, '..', '..', '..', 'templates');
+  if (fs.existsSync(fallback)) return fallback;
+  throw new Error(
+    `[scaffold-docs] Could not locate templates directory (tried ${candidate} and ${fallback})`,
+  );
+}
+
+function readTemplate(name: string): string {
+  const file = path.join(resolveTemplatesDir(), `${name}.md`);
+  return fs.readFileSync(file, 'utf-8');
+}
+
+export function scaffoldDocs(targetDir: string, options: ScaffoldOptions = {}): void {
+  const modes = options.modes ?? ['documentation'];
+  const includeDocumentation = modes.includes('documentation');
+
+  if (includeDocumentation) {
+    for (const dir of DOC_DIRS) {
+      const fullPath = path.join(targetDir, dir);
+      if (!fs.existsSync(fullPath)) {
+        fs.mkdirSync(fullPath, { recursive: true });
+      }
+    }
+
+    const indexPath = path.join(targetDir, 'docs', 'INDEX.md');
+    if (!fs.existsSync(indexPath)) {
+      fs.writeFileSync(indexPath, `# Project Documentation Index
 
 > Auto-maintained by AgentOS. Updated when documents are created.
 
@@ -45,90 +90,56 @@ _(No entries yet)_
 ## Decisions
 _(No entries yet)_
 `);
+    }
   }
 
-  // CLAUDE.md — Agent entry point with documentation rules
+  // Build CLAUDE.md from templates.
+  const projectName = path.basename(path.resolve(targetDir));
+  const parts: string[] = [`# ${projectName} — Project Rules\n`];
+  parts.push(readTemplate('core'));
+
+  for (const mode of modes) {
+    const templateName: Record<ScaffoldMode, string> = {
+      documentation: 'documentation-system',
+      parallel: 'parallel-mode',
+      'event-sourcing': 'event-sourcing',
+      'multi-provider': 'multi-provider',
+    };
+    parts.push(readTemplate(templateName[mode]));
+  }
+
+  const claudeContent = parts.join('\n');
   const claudePath = path.join(targetDir, 'CLAUDE.md');
-  const claudeContent = `# Project Rules
 
-## Documentation System
-
-This project uses a structured documentation system in \`docs/\`.
-
-### Directory Structure
-
-\`\`\`
-docs/
-├── INDEX.md             ← Global index (keep updated when adding docs)
-├── concepts/            ← Ideas, explorations, design investigations
-├── goals/               ← Project objectives and success criteria
-├── plans/               ← Phase plans, milestones, roadmaps
-├── tasks/               ← Actionable work items with acceptance criteria
-├── sessions/            ← Conversation summaries ("记录讨论" goes here)
-└── decisions/           ← Key decisions with rationale and alternatives
-\`\`\`
-
-### Document Types
-
-| Type | Trigger | Filename | Content |
-|------|---------|----------|---------|
-| concept | New idea or technical exploration | \`YYYYMMDD-topic.md\` | What, why, open questions |
-| goal | Establishing project objectives | \`goal-name.md\` | Objective, metrics, constraints |
-| plan | Planning phase work | \`phase-N-name.md\` | Scope, milestones, dependencies |
-| task | Actionable work breakdown | \`TASK-NNN-brief.md\` | What to do, acceptance criteria, status |
-| session | User says "记录讨论"/"record this" | \`YYYYMMDD-topic.md\` | Key points, conclusions, action items |
-| decision | Making a key choice | \`YYYYMMDD-topic.md\` | Decision, alternatives considered, rationale |
-
-### Frontmatter Template
-
-Every document should start with:
-
-\`\`\`yaml
----
-type: concept | goal | plan | task | session | decision
-title: Brief descriptive title
-date: YYYY-MM-DD
-status: draft | active | completed | archived
-tags: [relevant, tags]
----
-\`\`\`
-
-### Agent Behavior Rules
-
-When the user says "记录讨论", "记录一下", "record this discussion", or similar:
-
-1. Review the current conversation and extract: **key points**, **conclusions**, **action items**
-2. Determine which document types apply (may produce multiple: session + concept + task)
-3. Create files in the appropriate \`docs/\` subdirectory with correct frontmatter
-4. Update \`docs/INDEX.md\` with links to new documents
-5. Confirm to the user which files were created
-
-When creating task documents, use sequential numbering: check existing \`docs/tasks/TASK-*.md\` files and increment.
-
-### Document Status Flow
-
-\`\`\`
-draft → active → completed
-                → archived (if abandoned)
-\`\`\`
-
-## AgentOS
-
-This project is monitored by AgentOS. The daemon observes file changes, git activity, and project state.
-
-- Config: \`.agentos/config.json\`
-- Start daemon: \`agentos start\`
-- Web console: \`agentos open\`
-`;
-
-  // Write or merge CLAUDE.md
   if (fs.existsSync(claudePath)) {
+    // Don't clobber an existing CLAUDE.md; append if our generated content is
+    // new (cheap check: look for the Core section marker).
     const existing = fs.readFileSync(claudePath, 'utf-8');
-    if (!existing.includes('Documentation System')) {
-      // Append doc rules to existing CLAUDE.md
+    if (!existing.includes('## AgentOS')) {
       fs.writeFileSync(claudePath, existing + '\n' + claudeContent);
     }
   } else {
     fs.writeFileSync(claudePath, claudeContent);
   }
+}
+
+/**
+ * Parse a comma-separated `--mode` flag value into a deduplicated mode list.
+ * Accepts `all` as a shortcut for every mode. Unknown values throw.
+ */
+export function parseModes(input: string | undefined): ScaffoldMode[] {
+  if (!input) return ['documentation'];
+  const tokens = input.split(',').map((s) => s.trim()).filter(Boolean);
+  if (tokens.includes('all')) return [...AVAILABLE_MODES];
+  const result: ScaffoldMode[] = [];
+  for (const token of tokens) {
+    if (!(AVAILABLE_MODES as readonly string[]).includes(token)) {
+      throw new Error(
+        `Unknown mode '${token}'. Available: ${AVAILABLE_MODES.join(', ')}, or 'all'.`,
+      );
+    }
+    const mode = token as ScaffoldMode;
+    if (!result.includes(mode)) result.push(mode);
+  }
+  return result;
 }

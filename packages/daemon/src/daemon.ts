@@ -20,6 +20,8 @@ import { AuditLog } from './telemetry/audit-log.js';
 import { initialScan } from './observers/initial-scanner.js';
 import { DesignTaskManager } from './design-iteration/design-task-manager.js';
 import { DesignPipeline } from './design-iteration/design-pipeline.js';
+import { InitiativeManager } from './initiatives/manager.js';
+import { RetrospectiveEngine } from './retrospectives/engine.js';
 import type { Observer } from './observers/types.js';
 import type { ProviderName } from './reasoning/types.js';
 
@@ -51,6 +53,16 @@ const DESIGN_EVENT_TYPES = [
   'design_round_converged',
   'design_task_completed',
 ];
+const INITIATIVE_EVENT_TYPES = [
+  'initiative_created',
+  'initiative_updated',
+  'initiative_note_added',
+  'initiative_completed',
+  'initiative_abandoned',
+];
+const RETROSPECTIVE_EVENT_TYPES = ['retrospective_generated'];
+
+const DEFAULT_RETROSPECTIVE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 export class Daemon {
   // Core
@@ -75,6 +87,10 @@ export class Daemon {
   private suggestionEngine: SuggestionEngine;
   private designTaskManager: DesignTaskManager;
   private designPipeline: DesignPipeline;
+  private initiativeManager: InitiativeManager;
+  private retrospectiveEngine: RetrospectiveEngine;
+  private retrospectiveTimer: NodeJS.Timeout | null = null;
+  private retrospectiveIntervalMs: number = DEFAULT_RETROSPECTIVE_INTERVAL_MS;
 
   // Trust
   private confidenceCalibrator: ConfidenceCalibrator;
@@ -107,6 +123,22 @@ export class Daemon {
     this.suggestionEngine = new SuggestionEngine({ projectId: PROJECT_ID, emit });
     this.designTaskManager = new DesignTaskManager({ projectId: PROJECT_ID, emit });
     this.designPipeline = new DesignPipeline({ taskManager: this.designTaskManager });
+    this.initiativeManager = new InitiativeManager({ projectId: PROJECT_ID, emit });
+    this.retrospectiveEngine = new RetrospectiveEngine({
+      projectId: PROJECT_ID,
+      eventStore: this.eventStore,
+      initiativeManager: this.initiativeManager,
+      emit,
+    });
+
+    // Pick up override from .agentos/config.json if present.
+    try {
+      const cfgRaw = fs.readFileSync(path.join(this.agentosDir, 'config.json'), 'utf-8');
+      const cfg = JSON.parse(cfgRaw) as { retrospective?: { intervalMs?: number } };
+      if (typeof cfg.retrospective?.intervalMs === 'number' && cfg.retrospective.intervalMs > 0) {
+        this.retrospectiveIntervalMs = cfg.retrospective.intervalMs;
+      }
+    } catch { /* no override */ }
 
     // ── Trust ──
     this.confidenceCalibrator = new ConfidenceCalibrator();
@@ -128,6 +160,8 @@ export class Daemon {
       suggestionEngine: this.suggestionEngine,
       designTaskManager: this.designTaskManager,
       designPipeline: this.designPipeline,
+      initiativeManager: this.initiativeManager,
+      retrospectiveEngine: this.retrospectiveEngine,
       metricsCollector: this.metricsCollector,
       auditLog: this.auditLog,
       configPath: path.join(this.agentosDir, 'config.json'),
@@ -174,6 +208,9 @@ export class Daemon {
     // ── Start API server ──
     await this.apiServer.start();
 
+    // ── Schedule periodic retrospective generation ──
+    this.startRetrospectiveScheduler();
+
     // ── PID file ──
     fs.writeFileSync(path.join(this.agentosDir, 'daemon.pid'), String(process.pid));
 
@@ -181,6 +218,10 @@ export class Daemon {
   }
 
   async stop(): Promise<void> {
+    if (this.retrospectiveTimer) {
+      clearInterval(this.retrospectiveTimer);
+      this.retrospectiveTimer = null;
+    }
     for (const obs of this.observers) {
       await obs.stop();
     }
@@ -211,6 +252,8 @@ export class Daemon {
   getFeedbackTracker(): FeedbackTracker { return this.feedbackTracker; }
   getConfidenceCalibrator(): ConfidenceCalibrator { return this.confidenceCalibrator; }
   getDampingController(): DampingController { return this.dampingController; }
+  getInitiativeManager(): InitiativeManager { return this.initiativeManager; }
+  getRetrospectiveEngine(): RetrospectiveEngine { return this.retrospectiveEngine; }
 
   // ── Private setup methods ──
 
@@ -220,9 +263,28 @@ export class Daemon {
 
     this.suggestionEngine.replay(allEvents.filter((e) => SUGGESTION_EVENT_TYPES.includes(e.type)));
     this.designTaskManager.replay(allEvents.filter((e) => DESIGN_EVENT_TYPES.includes(e.type)));
+    this.initiativeManager.replay(allEvents.filter((e) => INITIATIVE_EVENT_TYPES.includes(e.type)));
+    this.retrospectiveEngine.replay(allEvents.filter((e) => RETROSPECTIVE_EVENT_TYPES.includes(e.type)));
     // Replay the TaskManager once it owns a CodeTask pipeline instance wired via
     // the ReviewPipeline integration path.
     void TASK_EVENT_TYPES;
+  }
+
+  private startRetrospectiveScheduler(): void {
+    if (this.retrospectiveIntervalMs <= 0) return;
+    this.retrospectiveTimer = setInterval(() => {
+      try {
+        this.retrospectiveEngine.generate({ windowMs: this.retrospectiveIntervalMs });
+      } catch (err) {
+        this.auditLog.record({
+          actor: 'system',
+          action: 'retrospective_failed',
+          target: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }, this.retrospectiveIntervalMs);
+    // Don't let this timer keep the process alive on its own.
+    this.retrospectiveTimer.unref?.();
   }
 
   private async registerProviders(): Promise<void> {

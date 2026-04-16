@@ -67,4 +67,5 @@ export interface CodeTask {
   change_level: ChangeLevel;
   pipeline: TaskPipeline;
   status: TaskStatus;
+  initiative_id?: string;
 }

@@ -28,6 +28,7 @@ export class SuggestionEngine {
     confidence: number;
     impact: Suggestion['impact'];
     region?: string;
+    initiative_id?: string;
   }): Suggestion {
     const suggestion: Suggestion = {
       id: ulid(),
@@ -40,6 +41,7 @@ export class SuggestionEngine {
       impact: opts.impact,
       status: 'pending',
       region: opts.region,
+      initiative_id: opts.initiative_id,
     };
 
     this.suggestions.set(suggestion.id, suggestion);

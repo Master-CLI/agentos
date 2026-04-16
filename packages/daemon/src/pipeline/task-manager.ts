@@ -36,6 +36,7 @@ export class TaskManager {
     relatedModules?: string[];
     changeLevel?: ChangeLevel;
     sourceSuggestionId?: string;
+    initiativeId?: string;
   }): CodeTask {
     const task: CodeTask = {
       id: ulid(),
@@ -50,6 +51,7 @@ export class TaskManager {
       change_level: opts.changeLevel ?? 'standard',
       pipeline: emptyPipeline(),
       status: 'queued',
+      initiative_id: opts.initiativeId,
     };
 
     this.tasks.set(task.id, task);
