@@ -15,6 +15,9 @@ import type { RetrospectiveEngine } from '../retrospectives/engine.js';
 import { handleDesignRoute } from './design-routes.js';
 import { handleInitiativeRoute } from './initiative-routes.js';
 import { handleRetrospectiveRoute } from './retrospective-routes.js';
+import { scanActiveTodos } from './active-todos.js';
+import { lookupGating } from './gating.js';
+import { allocateNextTaskId } from './task-id.js';
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html',
@@ -48,6 +51,7 @@ export interface ApiServerOptions {
   metricsCollector?: MetricsCollector;
   auditLog?: AuditLog;
   configPath?: string;
+  projectDir?: string;
 }
 
 export class ApiServer {
@@ -64,6 +68,7 @@ export class ApiServer {
   private metricsCollector?: MetricsCollector;
   private auditLog?: AuditLog;
   private configPath?: string;
+  private projectDir?: string;
   private unsubscribe?: () => void;
 
   constructor(private opts: ApiServerOptions) {
@@ -77,6 +82,7 @@ export class ApiServer {
     this.metricsCollector = opts.metricsCollector;
     this.auditLog = opts.auditLog;
     this.configPath = opts.configPath;
+    this.projectDir = opts.projectDir;
 
     this.httpServer = createServer((req, res) => this.handleHttp(req, res));
     this.wss = new WebSocketServer({ server: this.httpServer });
@@ -97,6 +103,7 @@ export class ApiServer {
   setMetricsCollector(mc: MetricsCollector): void { this.metricsCollector = mc; }
   setAuditLog(al: AuditLog): void { this.auditLog = al; }
   setConfigPath(p: string): void { this.configPath = p; }
+  setProjectDir(p: string): void { this.projectDir = p; }
 
   start(): Promise<void> {
     return new Promise((resolve) => {
@@ -202,6 +209,49 @@ export class ApiServer {
       Object.assign(config, updates);
       fs.writeFileSync(this.configPath, JSON.stringify(config, null, 2));
       return this.json(res, 200, config);
+    }
+
+    // ── GET /api/active-todos and /api/session/pending — session-start bundle ──
+    // Aggregates: open tasks (docs/tasks/), project-memory pointers, git
+    // ahead/behind/dirty/unpushed-tags, and CHANGELOG.md [Unreleased] state.
+    // /api/active-todos kept for backwards compat with the existing web UI.
+    if (method === 'GET' && (url === '/api/active-todos' || url === '/api/session/pending')) {
+      if (!this.projectDir) return this.json(res, 503, { error: 'projectDir not configured' });
+      try {
+        const snapshot = await scanActiveTodos(this.projectDir);
+        return this.json(res, 200, snapshot);
+      } catch (err) {
+        return this.json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
+    // ── GET /api/gating?file=<path> — decision-doc "read first" lookups ──
+    // Returns the gating rules whose glob matches the given file path. Used
+    // by editor integrations and `agentos gating` to surface "must read X
+    // before touching Y" hints from `.agentos/gating.json`.
+    if (method === 'GET' && url.startsWith('/api/gating')) {
+      if (!this.projectDir) return this.json(res, 503, { error: 'projectDir not configured' });
+      const file = new URL(url, 'http://localhost').searchParams.get('file');
+      if (!file) return this.json(res, 400, { error: 'file query parameter is required' });
+      try {
+        const result = await lookupGating(this.projectDir, file);
+        return this.json(res, 200, result);
+      } catch (err) {
+        return this.json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
+    // ── POST /api/task/next-id — atomic TASK-NNN allocation ──
+    // Returns the next id without creating a placeholder file. Uses a
+    // `.agentos/task-counter.json` cache so concurrent callers don't collide.
+    if (method === 'POST' && url === '/api/task/next-id') {
+      if (!this.projectDir) return this.json(res, 503, { error: 'projectDir not configured' });
+      try {
+        const result = await allocateNextTaskId(this.projectDir);
+        return this.json(res, 200, result);
+      } catch (err) {
+        return this.json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      }
     }
 
     // ── GET /api/audit ──

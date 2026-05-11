@@ -181,6 +181,30 @@ export async function initProject(targetDir: string, options: InitOptions = {}):
     } catch { /* ignore if list module not available */ }
   }
 
+  // Install the pre-commit CHANGELOG reminder hook. Best-effort and reversible
+  // — never overwrites a user's own hook (unless `agentos install-hooks --force`).
+  try {
+    const { installPreCommitHook } = await import('./install-hooks.js');
+    const result = installPreCommitHook(targetDir);
+    if (result.status === 'installed' || result.status === 'updated') {
+      console.log(`  Hooks:      pre-commit (${result.status})`);
+    } else if (result.status === 'skipped-foreign') {
+      console.log(`  Hooks:      pre-commit skipped (existing user hook — run 'agentos install-hooks --force' to replace)`);
+    }
+  } catch (err) {
+    console.error('  Hooks:      failed —', err instanceof Error ? err.message : err);
+  }
+
+  // Seed default gating.json — never overwrites a user-edited file.
+  try {
+    const { writeDefaultGatingIfMissing } = await import('@agentos/daemon');
+    if (writeDefaultGatingIfMissing(targetDir)) {
+      console.log(`  Gating:     .agentos/gating.json (default ruleset)`);
+    }
+  } catch (err) {
+    console.error('  Gating:     failed —', err instanceof Error ? err.message : err);
+  }
+
   console.log(`\nRun 'agentos start' to launch the daemon.`);
   console.log(`Run 'agentos open' to open the web console.`);
 }

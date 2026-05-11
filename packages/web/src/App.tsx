@@ -5,8 +5,9 @@ import { DialogChat } from './views/DialogChat';
 import { SuggestionInbox } from './views/SuggestionInbox';
 import { StatusOverview } from './views/StatusOverview';
 import { ChangeStream } from './views/ChangeStream';
+import { ActiveTodos } from './views/ActiveTodos';
 
-type View = 'chat' | 'suggestions' | 'status' | 'events';
+type View = 'chat' | 'todos' | 'suggestions' | 'status' | 'events';
 
 export default function App() {
   const { status } = useWebSocket();
@@ -23,6 +24,9 @@ export default function App() {
         <button className={view === 'chat' ? 'active' : ''} onClick={() => setView('chat')}>
           Chat
         </button>
+        <button className={view === 'todos' ? 'active' : ''} onClick={() => setView('todos')}>
+          TODOs
+        </button>
         <button className={view === 'suggestions' ? 'active' : ''} onClick={() => setView('suggestions')}>
           Suggestions
         </button>
@@ -36,6 +40,7 @@ export default function App() {
 
       <main className="main">
         {view === 'chat' && <DialogChat />}
+        {view === 'todos' && <ActiveTodos />}
         {view === 'suggestions' && <SuggestionInbox />}
         {view === 'status' && <StatusOverview />}
         {view === 'events' && <ChangeStream />}
