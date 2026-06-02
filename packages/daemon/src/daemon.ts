@@ -24,11 +24,18 @@ import { InitiativeManager } from './initiatives/manager.js';
 import { RetrospectiveEngine } from './retrospectives/engine.js';
 import { TaskManager } from './pipeline/task-manager.js';
 import type { Observer } from './observers/types.js';
-import type { ProviderName } from './reasoning/types.js';
+import type { ProviderName, ReasoningProvider } from './reasoning/types.js';
 
 export interface DaemonOptions {
   projectDir: string;
   port: number;
+  /**
+   * Optional: inject pre-built providers (e.g. stubs in tests).
+   * When non-empty, registerProviders() skips all real CLI/Ollama probing
+   * and registers exactly these providers instead.
+   * Leave undefined (or empty) for normal production behavior.
+   */
+  reasoningProviders?: ReasoningProvider[];
 }
 
 const PROJECT_ID = 'default';
@@ -300,6 +307,19 @@ export class Daemon {
   }
 
   private async registerProviders(): Promise<void> {
+    // If test/custom providers are injected, register them and skip all real probing.
+    if (this.opts.reasoningProviders && this.opts.reasoningProviders.length > 0) {
+      for (const provider of this.opts.reasoningProviders) {
+        this.router.registerProvider(provider);
+        if (provider.available) {
+          this.auditLog.record({ actor: 'system', action: 'provider_registered', target: provider.name });
+        }
+      }
+      return;
+    }
+
+    // Production path — probe real providers.
+
     // Local LLM (Watchdog)
     const localLlm = new LocalLlmProvider();
     const ollamaOk = await localLlm.checkAvailability();

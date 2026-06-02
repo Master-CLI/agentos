@@ -5,6 +5,27 @@ import * as os from 'node:os';
 import { Daemon } from '../src/daemon.js';
 import { safeRmSync } from './helpers.js';
 import WebSocket from 'ws';
+import type { ReasoningProvider, ReasoningTask, ReasoningResult } from '../src/reasoning/types.js';
+
+/**
+ * Hermetic stub: satisfies ReasoningProvider without spawning any real process.
+ * Registered for the 'local-llm' provider name so it is picked up by the
+ * 'interpret' task type (ROUTING_TABLE maps interpret → local-llm).
+ */
+class StubReasoningProvider implements ReasoningProvider {
+  readonly name = 'local-llm' as const;
+  readonly available = true;
+
+  invoke(task: ReasoningTask): Promise<ReasoningResult> {
+    return Promise.resolve({
+      task_id: task.id,
+      provider: this.name,
+      output: 'This is a TypeScript project.',
+      confidence: 1,
+      latency_ms: 0,
+    });
+  }
+}
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'agentos-e2e-'));
@@ -28,7 +49,7 @@ describe('E2E — init → start → chat → suggestions → stop', () => {
     const { initProject } = await import('../../cli/src/commands/init.js');
     await initProject(projectDir);
 
-    daemon = new Daemon({ projectDir, port: 0 });
+    daemon = new Daemon({ projectDir, port: 0, reasoningProviders: [new StubReasoningProvider()] });
     await daemon.start();
     baseUrl = `http://localhost:${daemon.port}`;
   }, 60000);
@@ -73,7 +94,7 @@ describe('E2E — init → start → chat → suggestions → stop', () => {
 
   // ── Dialog (项目问答) ──
 
-  it('POST /api/dialog → 返回 assistant 消息', { timeout: 120000 }, async () => {
+  it('POST /api/dialog → 返回 assistant 消息', async () => {
     const res = await fetch(`${baseUrl}/api/dialog`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -120,11 +141,17 @@ describe('E2E — init → start → chat → suggestions → stop', () => {
   });
 
   it('POST /api/suggestions/:id/dismiss → 状态变 rejected', async () => {
-    const suggestions = await (await fetch(`${baseUrl}/api/suggestions`)).json() as any[];
-    const pending = suggestions.find((s: any) => s.status === 'pending');
-    if (!pending) return; // skip if none pending
+    // Create a fresh suggestion so this test is self-contained and deterministic.
+    const created = daemon.getSuggestionEngine().create({
+      category: 'architecture',
+      summary: 'dismiss test suggestion',
+      detail: 'created by dismiss test',
+      evidence: ['test'],
+      confidence: 0.8,
+      impact: 'low',
+    });
 
-    const res = await fetch(`${baseUrl}/api/suggestions/${pending.id}/dismiss`, { method: 'POST' });
+    const res = await fetch(`${baseUrl}/api/suggestions/${created.id}/dismiss`, { method: 'POST' });
     expect(res.status).toBe(200);
     const body = await res.json() as any;
     expect(body.status).toBe('rejected');
