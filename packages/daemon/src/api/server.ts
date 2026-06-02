@@ -26,6 +26,26 @@ const MIME_TYPES: Record<string, string> = {
   '.ico': 'image/x-icon',
 };
 
+/** Maximum request body size (1 MB). */
+const MAX_BODY_BYTES = 1 * 1024 * 1024;
+
+/**
+ * Allowed settings keys and their type validators.
+ * Inferred from daemon.ts: auto_execute (boolean), retrospective.intervalMs (number),
+ * watch_paths (string[]).
+ */
+const SETTINGS_WHITELIST: Record<string, (v: unknown) => boolean> = {
+  auto_execute: (v) => typeof v === 'boolean',
+  retrospective: (v) =>
+    typeof v === 'object' &&
+    v !== null &&
+    !Array.isArray(v) &&
+    Object.keys(v as object).every(
+      (k) => k === 'intervalMs' && typeof (v as Record<string, unknown>)[k] === 'number',
+    ),
+  watch_paths: (v) => Array.isArray(v) && (v as unknown[]).every((item) => typeof item === 'string'),
+};
+
 function resolveWebDir(): string | null {
   try {
     // Resolve from daemon package: ../../web/dist
@@ -66,6 +86,10 @@ export class ApiServer {
   private configPath?: string;
   private unsubscribe?: () => void;
 
+  // P2-5: fs-event coalescing
+  private fsBatchBuffer: unknown[] = [];
+  private fsBatchTimer: ReturnType<typeof setTimeout> | null = null;
+
   constructor(private opts: ApiServerOptions) {
     this.eventBus = opts.eventBus;
     this.dialogHandler = opts.dialogHandler;
@@ -81,7 +105,23 @@ export class ApiServer {
     this.httpServer = createServer((req, res) => this.handleHttp(req, res));
     this.wss = new WebSocketServer({ server: this.httpServer });
 
-    this.wss.on('connection', (ws) => {
+    // P0-3: WebSocket Origin check
+    this.wss.on('connection', (ws, req) => {
+      const origin = req.headers.origin;
+      if (origin !== undefined) {
+        let allowed = false;
+        try {
+          const { hostname } = new URL(origin);
+          allowed = hostname === 'localhost' || hostname === '127.0.0.1';
+        } catch {
+          allowed = false;
+        }
+        if (!allowed) {
+          ws.close(1008, 'Origin not allowed');
+          return;
+        }
+      }
+      // origin is undefined (non-browser client) or allowed hostname
       this.clients.add(ws);
       ws.send(JSON.stringify({ type: 'connected', timestamp: new Date().toISOString() }));
       ws.on('close', () => this.clients.delete(ws));
@@ -100,12 +140,32 @@ export class ApiServer {
 
   start(): Promise<void> {
     return new Promise((resolve) => {
-      this.httpServer.listen(this.opts.port, () => {
+      // P0-1: Bind to localhost only
+      this.httpServer.listen(this.opts.port, '127.0.0.1', () => {
         this.unsubscribe = this.eventBus.subscribe((event) => {
-          const msg = JSON.stringify(event);
-          for (const client of this.clients) {
-            if (client.readyState === WebSocket.OPEN) {
-              client.send(msg);
+          // P2-5: Coalesce fs events; broadcast non-fs events immediately
+          if ((event as { source?: string }).source === 'fs') {
+            this.fsBatchBuffer.push(event);
+            if (this.fsBatchTimer === null) {
+              this.fsBatchTimer = setTimeout(() => {
+                const batch = this.fsBatchBuffer.splice(0);
+                this.fsBatchTimer = null;
+                for (const ev of batch) {
+                  const msg = JSON.stringify(ev);
+                  for (const client of this.clients) {
+                    if (client.readyState === WebSocket.OPEN) {
+                      client.send(msg);
+                    }
+                  }
+                }
+              }, 250);
+            }
+          } else {
+            const msg = JSON.stringify(event);
+            for (const client of this.clients) {
+              if (client.readyState === WebSocket.OPEN) {
+                client.send(msg);
+              }
             }
           }
         });
@@ -117,6 +177,12 @@ export class ApiServer {
 
   stop(): Promise<void> {
     return new Promise((resolve, reject) => {
+      // P2-5: Clear any pending fs batch timer
+      if (this.fsBatchTimer !== null) {
+        clearTimeout(this.fsBatchTimer);
+        this.fsBatchTimer = null;
+        this.fsBatchBuffer = [];
+      }
       this.unsubscribe?.();
       for (const client of this.clients) {
         client.close();
@@ -147,8 +213,27 @@ export class ApiServer {
     // ── POST /api/dialog — 项目问答 ──
     if (method === 'POST' && url === '/api/dialog') {
       if (!this.dialogHandler) return this.json(res, 503, { error: 'dialog not ready' });
-      const body = await this.readBody(req);
-      const { question } = JSON.parse(body);
+
+      // P1-12: Harden body reading
+      let body: string;
+      try {
+        body = await this.readBody(req);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg === 'payload too large') {
+          return this.json(res, 413, { error: 'payload too large' });
+        }
+        return this.json(res, 400, { error: 'bad request' });
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        return this.json(res, 400, { error: 'invalid JSON' });
+      }
+
+      const { question } = parsed as Record<string, unknown>;
       if (!question) return this.json(res, 400, { error: 'question is required' });
 
       // Stream output via WebSocket while waiting for answer
@@ -160,7 +245,7 @@ export class ApiServer {
       };
 
       try {
-        const answer = await this.dialogHandler.ask(question, onOutput);
+        const answer = await this.dialogHandler.ask(question as string, onOutput);
         return this.json(res, 200, answer);
       } catch (err) {
         return this.json(res, 500, { error: String(err) });
@@ -194,13 +279,45 @@ export class ApiServer {
     // ── PUT /api/settings ──
     if (method === 'PUT' && url === '/api/settings') {
       if (!this.configPath) return this.json(res, 503, { error: 'config not ready' });
-      const body = await this.readBody(req);
-      const updates = JSON.parse(body);
-      const fs = await import('node:fs');
+
+      // P1-12: Harden body reading
+      let body: string;
+      try {
+        body = await this.readBody(req);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg === 'payload too large') {
+          return this.json(res, 413, { error: 'payload too large' });
+        }
+        return this.json(res, 400, { error: 'bad request' });
+      }
+
+      let updates: unknown;
+      try {
+        updates = JSON.parse(body);
+      } catch {
+        return this.json(res, 400, { error: 'invalid JSON' });
+      }
+
+      // P1-13: Settings whitelist validation
+      if (typeof updates !== 'object' || updates === null || Array.isArray(updates)) {
+        return this.json(res, 400, { error: 'settings must be an object' });
+      }
+      for (const key of Object.keys(updates as object)) {
+        if (!(key in SETTINGS_WHITELIST)) {
+          return this.json(res, 400, { error: `unknown setting: ${key}` });
+        }
+        const validate = SETTINGS_WHITELIST[key];
+        if (!validate((updates as Record<string, unknown>)[key])) {
+          return this.json(res, 400, { error: `invalid value for setting: ${key}` });
+        }
+      }
+
+      const fsModule = await import('node:fs');
       let config: Record<string, unknown> = {};
-      try { config = JSON.parse(fs.readFileSync(this.configPath, 'utf-8')); } catch { /* fresh */ }
-      Object.assign(config, updates);
-      fs.writeFileSync(this.configPath, JSON.stringify(config, null, 2));
+      try { config = JSON.parse(fsModule.readFileSync(this.configPath, 'utf-8')); } catch { /* fresh */ }
+      Object.assign(config, updates as Record<string, unknown>);
+      fsModule.writeFileSync(this.configPath, JSON.stringify(config, null, 2));
       return this.json(res, 200, config);
     }
 
@@ -265,7 +382,24 @@ export class ApiServer {
     // ── Static files (Web UI) ──
     const webDir = resolveWebDir();
     if (webDir) {
-      let filePath = nodePath.join(webDir, url === '/' ? 'index.html' : url);
+      // P0-2: Path traversal guard
+      // Strip query string, decode percent-encoding, reject any remaining '..'
+      const rawPathname = url.split('?')[0];
+      let decodedPathname: string;
+      try {
+        decodedPathname = decodeURIComponent(rawPathname);
+      } catch {
+        return this.json(res, 400, { error: 'bad request' });
+      }
+      if (decodedPathname.includes('..')) {
+        return this.json(res, 403, { error: 'forbidden' });
+      }
+      const candidate = nodePath.resolve(webDir, decodedPathname === '/' ? 'index.html' : decodedPathname.replace(/^\//, ''));
+      if (candidate !== webDir && !candidate.startsWith(webDir + nodePath.sep)) {
+        return this.json(res, 403, { error: 'forbidden' });
+      }
+
+      let filePath = candidate;
       // SPA fallback: non-API, non-file paths → index.html
       if (!fs.existsSync(filePath)) {
         filePath = nodePath.join(webDir, 'index.html');
@@ -287,12 +421,32 @@ export class ApiServer {
     res.end(JSON.stringify(data));
   }
 
+  // P1-12: Cap body at 1 MB; reject on overflow.
+  // On overflow we drain (resume) the stream rather than destroying it so the
+  // caller can still write a 413 response over the same socket before closing.
   private readBody(req: IncomingMessage): Promise<string> {
     return new Promise((resolve, reject) => {
       let body = '';
-      req.on('data', (chunk) => { body += chunk; });
-      req.on('end', () => resolve(body));
-      req.on('error', reject);
+      let byteCount = 0;
+      let overLimit = false;
+      req.on('data', (chunk: Buffer) => {
+        if (overLimit) return; // discard; stream already draining
+        byteCount += chunk.length;
+        if (byteCount > MAX_BODY_BYTES) {
+          overLimit = true;
+          // Drain remaining data so the socket stays writable for the 413 response.
+          req.resume();
+          reject(new Error('payload too large'));
+          return;
+        }
+        body += chunk.toString();
+      });
+      req.on('end', () => {
+        if (!overLimit) resolve(body);
+      });
+      req.on('error', (err) => {
+        if (!overLimit) reject(err);
+      });
     });
   }
 }
