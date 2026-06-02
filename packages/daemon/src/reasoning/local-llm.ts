@@ -60,7 +60,19 @@ export class LocalLlmProvider implements ReasoningProvider {
         throw new Error(`Ollama returned ${res.status}: ${await res.text()}`);
       }
 
-      const body = await res.json() as { response: string };
+      /** Maximum bytes we will read from an Ollama response body (10 MiB). */
+      const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+
+      // Read the response body with a size cap to prevent OOM from a
+      // runaway or malicious Ollama response.
+      const rawBuffer = await res.arrayBuffer();
+      if (rawBuffer.byteLength > MAX_RESPONSE_BYTES) {
+        throw new Error(
+          `Ollama response exceeded ${MAX_RESPONSE_BYTES} bytes — aborting to prevent OOM`,
+        );
+      }
+      const rawText = new TextDecoder().decode(rawBuffer);
+      const body = JSON.parse(rawText) as { response: string };
       const latency = Date.now() - start;
 
       // Try to parse structured JSON from output

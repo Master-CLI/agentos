@@ -1,4 +1,4 @@
-import { simpleGit, type SimpleGit, type LogResult } from 'simple-git';
+import { simpleGit, type SimpleGit, type LogResult, type TaskOptions } from 'simple-git';
 import type { EmitEventFn } from '../events/types.js';
 import type { Observer } from './types.js';
 
@@ -65,41 +65,74 @@ export class GitObserver implements Observer {
   }
 
   private async checkNewCommits(): Promise<void> {
-    const log: LogResult = await this.git.log({ maxCount: 10 });
-    if (!log.latest) return;
+    if (!this.lastCommitHash) {
+      // No prior baseline — snapshot the current HEAD and start from here.
+      const log: LogResult = await this.git.log({ maxCount: 1 });
+      if (log.latest) this.lastCommitHash = log.latest.hash;
+      return;
+    }
 
-    if (this.lastCommitHash && log.latest.hash !== this.lastCommitHash) {
-      const newCommits = [];
-      for (const entry of log.all) {
-        if (entry.hash === this.lastCommitHash) break;
+    // Page through git log in batches until we find the last known commit (or
+    // exhaust history). This ensures bursts > 10 commits in one poll interval
+    // are never silently dropped.
+    const PAGE_SIZE = 50;
+    let skip = 0;
+    const newCommits: LogResult['all'][number][] = [];
+    let foundAnchor = false;
+
+    while (true) {
+      // simple-git TaskOptions accepts a string[] of raw git flags.
+      const pageOpts: TaskOptions = [`--max-count=${PAGE_SIZE}`, `--skip=${skip}`];
+      const page: LogResult = await this.git.log(pageOpts);
+
+      if (!page.all.length) break; // History exhausted (or first commit with no parents)
+
+      for (const entry of page.all) {
+        if (entry.hash === this.lastCommitHash) {
+          foundAnchor = true;
+          break;
+        }
         newCommits.push(entry);
       }
 
-      for (const commit of newCommits.reverse()) {
-        let filesChanged: string[] = [];
-        try {
-          const diff = await this.git.diffSummary([`${commit.hash}~1`, commit.hash]);
-          filesChanged = diff.files.map((f) => f.file);
-        } catch {
-          // First commit has no parent
-        }
+      if (foundAnchor) break;
+      skip += PAGE_SIZE;
 
-        this.publishEvent({
-          source: 'git',
-          type: 'commit_pushed',
-          payload: {
-            hash: commit.hash,
-            message: commit.message,
-            author: commit.author_name,
-            date: commit.date,
-            files_changed: filesChanged,
-          },
-          metadata: { project_id: this.projectId },
-        });
-      }
+      // Safety: if every commit in history is "new" (e.g. force-push rewrote
+      // history), stop after a reasonable cap to avoid unbounded work.
+      if (newCommits.length >= 1000) break;
     }
 
-    this.lastCommitHash = log.latest.hash;
+    if (newCommits.length === 0) return;
+
+    // Advance the anchor BEFORE emitting events and making diffSummary calls.
+    // This prevents a re-entrant poll() (setInterval fires while this await
+    // chain is still running) from re-collecting the same commits.
+    // newCommits[0] before reverse() is the newest commit (git log order).
+    this.lastCommitHash = newCommits[0]!.hash;
+
+    for (const commit of newCommits.reverse()) {
+      let filesChanged: string[] = [];
+      try {
+        const diff = await this.git.diffSummary([`${commit.hash}~1`, commit.hash]);
+        filesChanged = diff.files.map((f) => f.file);
+      } catch {
+        // First commit has no parent — files_changed stays empty.
+      }
+
+      this.publishEvent({
+        source: 'git',
+        type: 'commit_pushed',
+        payload: {
+          hash: commit.hash,
+          message: commit.message,
+          author: commit.author_name,
+          date: commit.date,
+          files_changed: filesChanged,
+        },
+        metadata: { project_id: this.projectId },
+      });
+    }
   }
 
   private async checkNewBranches(): Promise<void> {

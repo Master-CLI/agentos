@@ -51,11 +51,28 @@ export class DampingController {
   }
 
   /**
+   * Remove regionCooldowns entries that have already expired.
+   * Called from shouldSuppress so the Map stays bounded even under long-running
+   * daemon instances that accumulate many distinct region keys.
+   */
+  private pruneExpiredCooldowns(now: number): void {
+    const cutoff = now - this.cooldownMs;
+    for (const [region, ts] of this.regionCooldowns) {
+      if (ts < cutoff) {
+        this.regionCooldowns.delete(region);
+      }
+    }
+  }
+
+  /**
    * Check if a suggestion should be suppressed.
    * Returns null if OK, or a reason string if suppressed.
    */
   shouldSuppress(region?: string): string | null {
     const now = Date.now();
+
+    // Prune stale entries to keep the Map bounded.
+    this.pruneExpiredCooldowns(now);
 
     // 1. Region cooldown
     if (region) {

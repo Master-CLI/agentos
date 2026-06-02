@@ -1,5 +1,7 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import type { ReasoningProvider, ReasoningTask, ReasoningResult, ProviderName, OutputCallback } from './types.js';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
 
 /**
  * Result of buildArgs: argv to pass to the CLI, plus (optionally) a prompt to
@@ -85,17 +87,66 @@ const PROVIDER_CONFIGS: Record<string, Omit<CliAgentConfig, 'name'>> = {
 };
 
 /**
- * On Windows many CLIs ship as `.cmd` / `.bat` shims. With `shell: false`,
- * Node's `spawn` requires the explicit extension (or a `cmd.exe /c` wrapper)
- * because it invokes `CreateProcess` directly and there is no PATHEXT fallback.
+ * Conservative argv element allowlist.
  *
- * We detect Windows and translate `cmd` → `cmd.exe /c cmd <args...>` so we
- * keep `shell: false` (no shell string parsing) while still letting PATHEXT
- * resolve the shim. The arguments we forward never go through a shell.
+ * Flags (--foo, -f) and simple values (alphanumeric, hyphens, underscores,
+ * dots, slashes, colons for paths, equals signs for --key=val) are permitted.
+ * Anything else is rejected before we ever hand it to spawn.
+ *
+ * IMPORTANT: buildArgs must NEVER place untrusted data (user input, file
+ * content, LLM output) directly on argv. Untrusted content must go via stdin.
  */
+const SAFE_ARG_RE = /^[a-zA-Z0-9_\-./:\\=@]*$/;
+
+function assertSafeArgv(args: readonly string[]): void {
+  for (const arg of args) {
+    if (!SAFE_ARG_RE.test(arg)) {
+      throw new Error(
+        `Unsafe argv element rejected (contains shell metacharacters): ${JSON.stringify(arg)}`,
+      );
+    }
+  }
+}
+
+/**
+ * On Windows many CLIs ship as `.cmd` / `.bat` shims. With `shell: false`,
+ * Node's `spawn` invokes `CreateProcess` directly (no PATHEXT lookup).
+ *
+ * We resolve the real executable path by walking PATH and checking PATHEXT
+ * extensions so we can call `spawn(realExe, args, { shell: false })` directly
+ * — NO `cmd.exe` wrapper. The previous wrapper re-introduced cmd.exe
+ * metacharacter parsing (CVE-2024-27980 class) and left the child as a zombie
+ * on timeout because killing cmd.exe does not kill its spawned child.
+ */
+function resolveWindowsExecutable(command: string): string {
+  // If caller already gave an absolute path with extension, trust it as-is.
+  if (path.isAbsolute(command) && fs.existsSync(command)) {
+    return command;
+  }
+
+  const pathExt = (process.env['PATHEXT'] ?? '.COM;.EXE;.BAT;.CMD').toUpperCase().split(';');
+  const pathDirs = (process.env['PATH'] ?? '').split(path.delimiter);
+
+  for (const dir of pathDirs) {
+    // Try the name as-is first (already has extension).
+    const direct = path.join(dir, command);
+    if (fs.existsSync(direct)) return direct;
+
+    // Try each PATHEXT extension.
+    for (const ext of pathExt) {
+      const candidate = path.join(dir, command + ext);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+
+  // Fall back to the bare name; spawn will error with ENOENT if not found,
+  // which is preferable to routing through cmd.exe.
+  return command;
+}
+
 function resolveSpawnTarget(command: string, args: string[]): { cmd: string; argv: string[] } {
   if (process.platform === 'win32') {
-    return { cmd: 'cmd.exe', argv: ['/d', '/s', '/c', command, ...args] };
+    return { cmd: resolveWindowsExecutable(command), argv: args };
   }
   return { cmd: command, argv: args };
 }
@@ -105,32 +156,52 @@ const AVAILABILITY_TIMEOUT_MS = 5_000;
 /** After SIGTERM we give the child this long to exit cleanly before SIGKILL. */
 const KILL_GRACE_MS = 2_000;
 
+/** Maximum bytes accumulated from child stdout + stderr before we abort. */
+const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10 MiB
+
+/**
+ * Kill the entire process tree rooted at `pid`.
+ *
+ * On win32: `taskkill /T /F /PID <pid>` (no shell interpolation — the pid is
+ * a number, not a user-supplied string, so numeric-only is guaranteed).
+ * On POSIX: SIGTERM then SIGKILL after grace period.
+ */
+function treeKill(child: ChildProcess): void {
+  if (process.platform === 'win32') {
+    if (child.pid === undefined) return;
+    // pid is always a safe positive integer — no shell metachar risk.
+    const killer = spawn('taskkill', ['/T', '/F', '/PID', String(child.pid)], {
+      stdio: 'ignore',
+      shell: false,
+      windowsHide: true,
+    } satisfies SpawnOptions);
+    killer.on('error', () => { /* best-effort */ });
+  } else {
+    if (!child.killed) {
+      try { child.kill('SIGTERM'); } catch { /* child already gone */ }
+      setTimeout(() => {
+        if (!child.killed) {
+          try { child.kill('SIGKILL'); } catch { /* child already gone */ }
+        }
+      }, KILL_GRACE_MS);
+    }
+  }
+}
+
 /**
  * Arm a hard timeout on a child process. On timeout the returned token exposes
- * `timedOut === true` and escalates SIGTERM → SIGKILL. Caller must `clear()`
+ * `timedOut === true` and kills the whole process tree. Caller must `clear()`
  * on normal exit so we don't leak timers.
  */
 function armTimeout(child: ChildProcess, ms: number): { clear: () => void; timedOut: () => boolean } {
   let timedOut = false;
   const softTimer = setTimeout(() => {
     timedOut = true;
-    if (!child.killed) {
-      try { child.kill('SIGTERM'); } catch { /* child already gone */ }
-    }
-    hardTimer = setTimeout(() => {
-      if (!child.killed) {
-        try { child.kill('SIGKILL'); } catch { /* child already gone */ }
-      }
-    }, KILL_GRACE_MS);
+    treeKill(child);
   }, ms);
 
-  let hardTimer: NodeJS.Timeout | null = null;
-
   return {
-    clear: () => {
-      clearTimeout(softTimer);
-      if (hardTimer) clearTimeout(hardTimer);
-    },
+    clear: () => { clearTimeout(softTimer); },
     timedOut: () => timedOut,
   };
 }
@@ -154,6 +225,14 @@ export class CliAgentProvider implements ReasoningProvider {
   async checkAvailability(): Promise<boolean> {
     return new Promise((resolve) => {
       const versionArgs = this.config.versionArgs ?? ['--version'];
+
+      // Validate argv elements before spawn.
+      try { assertSafeArgv(versionArgs); } catch {
+        this.available = false;
+        resolve(false);
+        return;
+      }
+
       const { cmd, argv } = resolveSpawnTarget(this.config.command, versionArgs);
 
       const child = spawn(cmd, argv, {
@@ -164,7 +243,11 @@ export class CliAgentProvider implements ReasoningProvider {
 
       const timer = armTimeout(child, AVAILABILITY_TIMEOUT_MS);
       let stdout = '';
-      child.stdout?.on('data', (d) => { stdout += d; });
+      let stdoutBytes = 0;
+      child.stdout?.on('data', (d: Buffer) => {
+        stdoutBytes += d.length;
+        if (stdoutBytes <= MAX_OUTPUT_BYTES) stdout += d.toString();
+      });
       // Drain stderr so the pipe buffer never blocks.
       child.stderr?.on('data', () => {});
 
@@ -190,6 +273,10 @@ export class CliAgentProvider implements ReasoningProvider {
   async invoke(task: ReasoningTask, onOutput?: OutputCallback): Promise<ReasoningResult> {
     const start = Date.now();
     const { args, stdin } = this.config.buildArgs(task);
+
+    // Validate argv elements before spawn — untrusted data must go via stdin, not argv.
+    assertSafeArgv(args);
+
     const { cmd, argv } = resolveSpawnTarget(this.config.command, args);
 
     return new Promise((resolve, reject) => {
@@ -203,6 +290,9 @@ export class CliAgentProvider implements ReasoningProvider {
 
       let stdout = '';
       let stderr = '';
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let outputOverflow = false;
       let settled = false;
 
       const settleReject = (err: Error) => {
@@ -218,15 +308,31 @@ export class CliAgentProvider implements ReasoningProvider {
         resolve(r);
       };
 
-      child.stdout?.on('data', (d) => {
+      const checkOverflow = () => {
+        if (!outputOverflow && stdoutBytes + stderrBytes > MAX_OUTPUT_BYTES) {
+          outputOverflow = true;
+          treeKill(child);
+          settleReject(new Error(
+            `CLI agent ${this.name} output exceeded ${MAX_OUTPUT_BYTES} bytes — killed`,
+          ));
+        }
+      };
+
+      child.stdout?.on('data', (d: Buffer) => {
+        // Always invoke the streaming callback so callers get live output.
         const chunk = d.toString();
-        stdout += chunk;
         onOutput?.(chunk, 'stdout');
+        // Only accumulate into the retained buffer up to the cap.
+        stdoutBytes += d.length;
+        if (stdoutBytes <= MAX_OUTPUT_BYTES) stdout += chunk;
+        checkOverflow();
       });
-      child.stderr?.on('data', (d) => {
+      child.stderr?.on('data', (d: Buffer) => {
         const chunk = d.toString();
-        stderr += chunk;
         onOutput?.(chunk, 'stderr');
+        stderrBytes += d.length;
+        if (stderrBytes <= MAX_OUTPUT_BYTES) stderr += chunk;
+        checkOverflow();
       });
 
       // Feed the prompt via stdin; we never place prompt content on argv.
