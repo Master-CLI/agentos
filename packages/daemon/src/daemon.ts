@@ -22,6 +22,7 @@ import { DesignTaskManager } from './design-iteration/design-task-manager.js';
 import { DesignPipeline } from './design-iteration/design-pipeline.js';
 import { InitiativeManager } from './initiatives/manager.js';
 import { RetrospectiveEngine } from './retrospectives/engine.js';
+import { TaskManager } from './pipeline/task-manager.js';
 import type { Observer } from './observers/types.js';
 import type { ProviderName } from './reasoning/types.js';
 
@@ -85,6 +86,7 @@ export class Daemon {
 
   // Managers (event-sourced)
   private suggestionEngine: SuggestionEngine;
+  private taskManager: TaskManager;
   private designTaskManager: DesignTaskManager;
   private designPipeline: DesignPipeline;
   private initiativeManager: InitiativeManager;
@@ -117,10 +119,11 @@ export class Daemon {
     this.router = new ReasoningRouter();
 
     // ── L2: State ──
-    this.snapshotEngine = new SnapshotEngine(PROJECT_ID, this.eventStore, this.eventBus);
+    this.snapshotEngine = new SnapshotEngine(PROJECT_ID, this.eventStore, this.eventBus, opts.projectDir);
 
     // ── Managers (event-sourced) ──
     this.suggestionEngine = new SuggestionEngine({ projectId: PROJECT_ID, emit });
+    this.taskManager = new TaskManager({ projectId: PROJECT_ID, emit });
     this.designTaskManager = new DesignTaskManager({ projectId: PROJECT_ID, emit });
     this.designPipeline = new DesignPipeline({ taskManager: this.designTaskManager });
     this.initiativeManager = new InitiativeManager({ projectId: PROJECT_ID, emit });
@@ -245,6 +248,7 @@ export class Daemon {
   getSnapshotEngine(): SnapshotEngine { return this.snapshotEngine; }
   getDialogHandler(): DialogHandler { return this.dialogHandler; }
   getSuggestionEngine(): SuggestionEngine { return this.suggestionEngine; }
+  getTaskManager(): TaskManager { return this.taskManager; }
   getDesignTaskManager(): DesignTaskManager { return this.designTaskManager; }
   getDesignPipeline(): DesignPipeline { return this.designPipeline; }
   getMetricsCollector(): MetricsCollector { return this.metricsCollector; }
@@ -262,12 +266,10 @@ export class Daemon {
     const allEvents = this.eventStore.query({ projectId: PROJECT_ID });
 
     this.suggestionEngine.replay(allEvents.filter((e) => SUGGESTION_EVENT_TYPES.includes(e.type)));
+    this.taskManager.replay(allEvents.filter((e) => TASK_EVENT_TYPES.includes(e.type)));
     this.designTaskManager.replay(allEvents.filter((e) => DESIGN_EVENT_TYPES.includes(e.type)));
     this.initiativeManager.replay(allEvents.filter((e) => INITIATIVE_EVENT_TYPES.includes(e.type)));
     this.retrospectiveEngine.replay(allEvents.filter((e) => RETROSPECTIVE_EVENT_TYPES.includes(e.type)));
-    // Replay the TaskManager once it owns a CodeTask pipeline instance wired via
-    // the ReviewPipeline integration path.
-    void TASK_EVENT_TYPES;
   }
 
   private startRetrospectiveScheduler(): void {
@@ -382,7 +384,7 @@ export class Daemon {
         summary: `Large file modified: ${String(event.payload.path).split(/[/\\]/).pop()}`,
         detail: `File is ${Math.round(Number(event.payload.size) / 1024)}KB. Consider splitting into smaller modules.`,
         evidence: [event.id ?? event.type],
-        confidence: 0.6,
+        confidence: this.confidenceCalibrator.adjust('architecture', 0.6),
         impact: 'low',
         region,
       });
@@ -396,7 +398,7 @@ export class Daemon {
         summary: `Large commit: ${event.payload.files_changed.length} files changed`,
         detail: `Commit "${String(event.payload.message).slice(0, 60)}" touches many files. Consider breaking into smaller commits.`,
         evidence: [event.id ?? event.type],
-        confidence: 0.7,
+        confidence: this.confidenceCalibrator.adjust('architecture', 0.7),
         impact: 'medium',
       });
       this.dampingController.recordSuggestion();

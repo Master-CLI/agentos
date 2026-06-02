@@ -1,8 +1,14 @@
 import Database, { type Database as DB } from 'better-sqlite3';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { ulid } from 'ulid';
+import { monotonicFactory } from 'ulid';
 import type { ProjectEvent } from './types.js';
+
+// Monotonic ULID factory: ids generated for events within the same millisecond
+// are strictly increasing, so `ORDER BY timestamp ASC, id ASC` reproduces causal
+// (append) order exactly — a hard requirement for deterministic event-sourcing
+// replay. Appends are synchronous and single-threaded, so this is causal-exact.
+const ulid = monotonicFactory();
 
 /**
  * Append-only event log backed by better-sqlite3.
@@ -109,7 +115,7 @@ export class EventStore {
 
     const rows = this.db.prepare(
       `SELECT id, timestamp, source, type, payload, project_id, correlation_id
-       FROM events ${where} ORDER BY timestamp ASC ${limit}`,
+       FROM events ${where} ORDER BY timestamp ASC, id ASC ${limit}`,
     ).all(...params) as Array<{
       id: string;
       timestamp: string;

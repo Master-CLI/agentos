@@ -189,6 +189,8 @@ describe('Phase 2 — 状态快照', () => {
     const events = store.query({});
     const lastEvent = events[events.length - 1];
     const snap = engine.getSnapshot();
+    // Event ids are monotonic (monotonicFactory), so ORDER BY timestamp, id
+    // reproduces append order — the last queried event is the last written.
     expect(snap.last_event_id).toBe(lastEvent.id);
   });
 
