@@ -19,7 +19,7 @@ import { safeRmSync } from './helpers.js';
  */
 function makeBusEmitter(bus: EventBus): EmitEventFn {
   return (event) => {
-    const full: ProjectEvent = { ...event, id: ulid(), timestamp: new Date().toISOString() };
+    const full: ProjectEvent = { ...event, id: ulid(), timestamp: new Date().toISOString(), version: 1 };
     bus.publish(full);
     return full;
   };

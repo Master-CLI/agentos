@@ -27,6 +27,7 @@ function makeRecorder(): { events: ProjectEvent[]; emit: EmitEventFn } {
       payload: frozenPayload,
       id: ulid(),
       timestamp: new Date().toISOString(),
+      version: 1,
     };
     events.push(full);
     return full;

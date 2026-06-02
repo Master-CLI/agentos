@@ -252,6 +252,7 @@ describe('P2-4 — file_event_counts 软上限 2000', () => {
       bus.publish({
         id: `ev-${i}`,
         timestamp: new Date().toISOString(),
+        version: 1,
         source: 'fs',
         type: 'file_modified',
         payload: { path: `/src/file-${i}.ts` },
@@ -285,6 +286,7 @@ describe('P2-4 — file_event_counts 软上限 2000', () => {
       bus.publish({
         id: `fill-${i}`,
         timestamp: new Date().toISOString(),
+        version: 1,
         source: 'fs',
         type: 'file_modified',
         payload: { path: `/src/file-${i}.ts` },
@@ -297,6 +299,7 @@ describe('P2-4 — file_event_counts 软上限 2000', () => {
       bus.publish({
         id: `reuse-${j}`,
         timestamp: new Date().toISOString(),
+        version: 1,
         source: 'fs',
         type: 'file_modified',
         payload: { path: '/src/file-0.ts' },

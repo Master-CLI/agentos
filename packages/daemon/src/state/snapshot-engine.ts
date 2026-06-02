@@ -1,7 +1,23 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { EventStore } from '../events/event-store.js';
 import type { EventBus } from '../events/event-bus.js';
 import type { ProjectEvent } from '../events/types.js';
 import { detectModules } from './module-detector.js';
+
+/**
+ * Version for the on-disk checkpoint file format.
+ * Bump this whenever ProjectSnapshot's shape changes in an incompatible way.
+ * A mismatched version triggers a full replay so the checkpoint is transparently
+ * regenerated on next stop().
+ */
+const SNAPSHOT_SCHEMA_VERSION = 1;
+
+interface SnapshotCheckpoint {
+  schemaVersion: number;
+  last_event_id: string;
+  snapshot: ProjectSnapshot;
+}
 
 export interface ModuleInfo {
   name: string;
@@ -35,6 +51,7 @@ export class SnapshotEngine {
     private eventStore: EventStore,
     private eventBus: EventBus,
     private projectDir?: string,
+    private checkpointPath?: string,
   ) {
     this.snapshot = this.emptySnapshot();
   }
@@ -52,20 +69,83 @@ export class SnapshotEngine {
 
   /**
    * Rebuild snapshot from event store (used on cold start).
+   *
+   * If a valid checkpoint exists at `checkpointPath` (matching schemaVersion),
+   * loads the checkpoint and replays only delta events (afterId). Any failure
+   * during checkpoint load falls back silently to a full replay, so correctness
+   * is always guaranteed.
    */
   async rebuild(): Promise<void> {
     await this.eventStore.ensureReady();
-    const events = this.eventStore.query({});
-    this.snapshot = this.emptySnapshot();
-    for (const event of events) {
-      this.applyEvent(event);
+
+    let loadedFromCheckpoint = false;
+
+    if (this.checkpointPath) {
+      try {
+        const raw = fs.readFileSync(this.checkpointPath, 'utf-8');
+        const checkpoint = JSON.parse(raw) as unknown;
+        if (
+          checkpoint !== null &&
+          typeof checkpoint === 'object' &&
+          'schemaVersion' in checkpoint &&
+          (checkpoint as SnapshotCheckpoint).schemaVersion === SNAPSHOT_SCHEMA_VERSION &&
+          'last_event_id' in checkpoint &&
+          typeof (checkpoint as SnapshotCheckpoint).last_event_id === 'string' &&
+          'snapshot' in checkpoint
+        ) {
+          const cp = checkpoint as SnapshotCheckpoint;
+          this.snapshot = cp.snapshot as ProjectSnapshot;
+          // Replay only the delta events appended since the checkpoint.
+          const delta = this.eventStore.query({ afterId: cp.last_event_id });
+          for (const event of delta) {
+            this.applyEvent(event);
+          }
+          loadedFromCheckpoint = true;
+        }
+      } catch { /* corrupt / missing / parse error → fall through to full replay */ }
     }
-    // Populate modules after rebuild — detection failure must not break replay.
+
+    if (!loadedFromCheckpoint) {
+      const events = this.eventStore.query({});
+      this.snapshot = this.emptySnapshot();
+      for (const event of events) {
+        this.applyEvent(event);
+      }
+    }
+
+    // Re-run module detection after any rebuild path — detection failure is non-fatal.
     if (this.projectDir) {
       try {
         this.snapshot.modules = detectModules(this.projectDir);
       } catch { /* detection failure is non-fatal */ }
     }
+  }
+
+  /**
+   * Atomically persist the current snapshot to the checkpoint file.
+   * Uses a temp-file + rename pattern so readers never see a partial write.
+   * Called by the daemon in stop(); interval-based persist can be added later.
+   */
+  persist(): void {
+    if (!this.checkpointPath) return;
+    try {
+      const checkpoint: SnapshotCheckpoint = {
+        schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+        last_event_id: this.snapshot.last_event_id,
+        snapshot: this.snapshot,
+      };
+      const dir = path.dirname(this.checkpointPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      // Temp file MUST live in the SAME directory as the target so the rename is
+      // a same-filesystem atomic move. os.tmpdir() can be a different drive
+      // (e.g. C: temp vs D: project on Windows), which makes renameSync throw
+      // EXDEV and silently defeat the checkpoint entirely.
+      const tmp = path.join(dir, `.snapshot-${process.pid}-${Date.now()}.json.tmp`);
+      fs.writeFileSync(tmp, JSON.stringify(checkpoint), 'utf-8');
+      fs.renameSync(tmp, this.checkpointPath);
+    } catch { /* persist failure is non-fatal; next rebuild will do a full replay */ }
   }
 
   getSnapshot(): ProjectSnapshot {

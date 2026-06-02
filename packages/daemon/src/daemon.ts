@@ -119,7 +119,13 @@ export class Daemon {
     this.router = new ReasoningRouter();
 
     // ── L2: State ──
-    this.snapshotEngine = new SnapshotEngine(PROJECT_ID, this.eventStore, this.eventBus, opts.projectDir);
+    this.snapshotEngine = new SnapshotEngine(
+      PROJECT_ID,
+      this.eventStore,
+      this.eventBus,
+      opts.projectDir,
+      path.join(this.agentosDir, 'snapshot.json'),
+    );
 
     // ── Managers (event-sourced) ──
     this.suggestionEngine = new SuggestionEngine({ projectId: PROJECT_ID, emit });
@@ -176,7 +182,7 @@ export class Daemon {
    * Persists the event to the store (stamping id + timestamp) and publishes
    * the fully-populated event to the in-process bus.
    */
-  appendAndPublish(event: Omit<ProjectEvent, 'id' | 'timestamp'>): ProjectEvent {
+  appendAndPublish(event: Omit<ProjectEvent, 'id' | 'timestamp' | 'version'>): ProjectEvent {
     const full = this.eventStore.append(event);
     this.eventBus.publish(full);
     return full;
@@ -229,6 +235,10 @@ export class Daemon {
       await obs.stop();
     }
     this.snapshotEngine.stop();
+    // Persist snapshot checkpoint before closing the event store.
+    // Persist-on-stop only (no interval); next start loads from checkpoint and
+    // replays only the delta, keeping cold-start cost bounded.
+    this.snapshotEngine.persist();
     await this.apiServer.stop();
     this.eventStore.close();
 

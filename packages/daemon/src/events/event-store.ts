@@ -2,7 +2,7 @@ import Database, { type Database as DB } from 'better-sqlite3';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { monotonicFactory } from 'ulid';
-import type { ProjectEvent } from './types.js';
+import { CURRENT_EVENT_VERSION, type ProjectEvent } from './types.js';
 
 // Monotonic ULID factory: ids generated for events within the same millisecond
 // are strictly increasing, so `ORDER BY timestamp ASC, id ASC` reproduces causal
@@ -39,16 +39,24 @@ export class EventStore {
         type TEXT NOT NULL,
         payload TEXT NOT NULL,
         project_id TEXT NOT NULL,
-        correlation_id TEXT
+        correlation_id TEXT,
+        version INTEGER NOT NULL DEFAULT 1
       );
       CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
       CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
       CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_id);
     `);
 
+    // Migrate existing databases that predate the `version` column.
+    // The try/catch is intentional: if the column already exists SQLite raises
+    // "duplicate column name", which we swallow so both fresh and legacy DBs work.
+    try {
+      this.db.exec('ALTER TABLE events ADD COLUMN version INTEGER NOT NULL DEFAULT 1');
+    } catch { /* column already exists — no-op */ }
+
     this.insertStmt = this.db.prepare(
-      `INSERT INTO events (id, timestamp, source, type, payload, project_id, correlation_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO events (id, timestamp, source, type, payload, project_id, correlation_id, version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
 
     this.ready = Promise.resolve();
@@ -58,10 +66,11 @@ export class EventStore {
     await this.ready;
   }
 
-  append(event: Omit<ProjectEvent, 'id' | 'timestamp'>): ProjectEvent {
+  append(event: Omit<ProjectEvent, 'id' | 'timestamp' | 'version'>): ProjectEvent {
     const full: ProjectEvent = {
       id: ulid(),
       timestamp: new Date().toISOString(),
+      version: CURRENT_EVENT_VERSION,
       ...event,
     };
 
@@ -73,6 +82,7 @@ export class EventStore {
       JSON.stringify(full.payload),
       full.metadata.project_id,
       full.metadata.correlation_id ?? null,
+      full.version,
     );
 
     return full;
@@ -85,10 +95,16 @@ export class EventStore {
     types?: string[];
     projectId?: string;
     limit?: number;
+    /** Return only events whose id is strictly greater than afterId (monotonic ULID order). */
+    afterId?: string;
   }): ProjectEvent[] {
     const conditions: string[] = [];
     const params: (string | number)[] = [];
 
+    if (opts.afterId) {
+      conditions.push('id > ?');
+      params.push(opts.afterId);
+    }
     if (opts.from) {
       conditions.push('timestamp >= ?');
       params.push(opts.from);
@@ -114,7 +130,7 @@ export class EventStore {
     const limit = opts.limit ? `LIMIT ${opts.limit}` : '';
 
     const rows = this.db.prepare(
-      `SELECT id, timestamp, source, type, payload, project_id, correlation_id
+      `SELECT id, timestamp, source, type, payload, project_id, correlation_id, version
        FROM events ${where} ORDER BY timestamp ASC, id ASC ${limit}`,
     ).all(...params) as Array<{
       id: string;
@@ -124,11 +140,13 @@ export class EventStore {
       payload: string;
       project_id: string;
       correlation_id: string | null;
+      version: number | null;
     }>;
 
     return rows.map((row) => ({
       id: row.id,
       timestamp: row.timestamp,
+      version: row.version ?? 1,
       source: row.source,
       type: row.type,
       payload: JSON.parse(row.payload),
