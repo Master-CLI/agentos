@@ -7,8 +7,9 @@ import { StatusOverview } from './views/StatusOverview';
 import { ChangeStream } from './views/ChangeStream';
 import { ComparisonView } from './views/ComparisonView';
 import { GoalsBoard } from './views/GoalsBoard';
+import { ActiveTodos } from './views/ActiveTodos';
 
-type View = 'chat' | 'suggestions' | 'status' | 'events' | 'design' | 'goals';
+type View = 'chat' | 'todos' | 'suggestions' | 'status' | 'events' | 'design' | 'goals';
 
 function AppShell() {
   const { status } = useWebSocketContext();
@@ -28,6 +29,9 @@ function AppShell() {
         <button className={view === 'chat' ? 'active' : ''} onClick={() => setView('chat')}>
           Chat
         </button>
+        <button className={view === 'todos' ? 'active' : ''} onClick={() => setView('todos')}>
+          TODOs
+        </button>
         <button className={view === 'suggestions' ? 'active' : ''} onClick={() => setView('suggestions')}>
           Suggestions
         </button>
@@ -45,6 +49,7 @@ function AppShell() {
       <main className="main">
         {view === 'status' && <StatusOverview />}
         {view === 'chat' && <DialogChat />}
+        {view === 'todos' && <ActiveTodos />}
         {view === 'suggestions' && <SuggestionInbox />}
         {view === 'events' && <ChangeStream />}
         {view === 'design' && <ComparisonView />}

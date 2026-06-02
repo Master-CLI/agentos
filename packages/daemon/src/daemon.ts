@@ -10,6 +10,8 @@ import { ReasoningRouter } from './reasoning/router.js';
 import { LocalLlmProvider } from './reasoning/local-llm.js';
 import { CliAgentProvider } from './reasoning/cli-agent.js';
 import { SnapshotEngine } from './state/snapshot-engine.js';
+import { ConfigRefresher } from './state/config-refresh.js';
+import { loadSyncRules, checkSyncPaths, formatViolation } from './suggestions/sync-paths-check.js';
 import { DialogHandler } from './dialog/dialog-handler.js';
 import { SuggestionEngine } from './suggestions/suggestion-engine.js';
 import { ConfidenceCalibrator } from './trust/confidence-calibrator.js';
@@ -87,6 +89,7 @@ export class Daemon {
 
   // State
   private snapshotEngine: SnapshotEngine;
+  private configRefresher: ConfigRefresher;
 
   // Dialog
   private dialogHandler: DialogHandler;
@@ -133,6 +136,10 @@ export class Daemon {
       opts.projectDir,
       path.join(this.agentosDir, 'snapshot.json'),
     );
+    this.configRefresher = new ConfigRefresher({
+      configPath: path.join(this.agentosDir, 'config.json'),
+      projectDir: opts.projectDir,
+    });
 
     // ── Managers (event-sourced) ──
     this.suggestionEngine = new SuggestionEngine({ projectId: PROJECT_ID, emit });
@@ -181,6 +188,7 @@ export class Daemon {
       metricsCollector: this.metricsCollector,
       auditLog: this.auditLog,
       configPath: path.join(this.agentosDir, 'config.json'),
+      projectDir: opts.projectDir,
     });
   }
 
@@ -211,6 +219,9 @@ export class Daemon {
     // ── Rebuild snapshot from persisted events ──
     await this.snapshotEngine.rebuild();
     this.snapshotEngine.start();
+
+    // ── Keep config.json's auto-derived fields in sync with reality ──
+    this.configRefresher.start();
 
     // ── Register reasoning providers ──
     await this.registerProviders();
@@ -246,6 +257,7 @@ export class Daemon {
     // Persist-on-stop only (no interval); next start loads from checkpoint and
     // replays only the delta, keeping cold-start cost bounded.
     this.snapshotEngine.persist();
+    this.configRefresher.stop();
     await this.apiServer.stop();
     this.eventStore.close();
 
@@ -395,6 +407,39 @@ export class Daemon {
     this.eventBus.subscribe((event) => {
       this.tryGenerateSuggestion(event);
     });
+
+    // Sync-paths check: when a commit lands, see if its file list violates
+    // any "touching X means also touching Y, Y, Y" invariants declared in
+    // `.agentos/sync-rules.json`. Each violation surfaces as one suggestion.
+    this.eventBus.subscribe((event) => {
+      this.tryFlagSyncPathsViolation(event);
+    });
+  }
+
+  private tryFlagSyncPathsViolation(event: ProjectEvent): void {
+    if (event.type !== 'commit_pushed') return;
+    const files = Array.isArray(event.payload.files_changed)
+      ? (event.payload.files_changed as string[])
+      : null;
+    if (!files || files.length === 0) return;
+    const hash = typeof event.payload.hash === 'string' ? event.payload.hash : '';
+
+    const rules = loadSyncRules(this.opts.projectDir).rules;
+    if (rules.length === 0) return;
+
+    const violations = checkSyncPaths(files, rules);
+    for (const v of violations) {
+      const { summary, detail } = formatViolation(v, hash);
+      this.suggestionEngine.create({
+        category: 'architecture',
+        summary,
+        detail,
+        evidence: [hash || event.id || event.type],
+        confidence: 0.85,
+        impact: 'high',
+        region: v.triggeredBy[0],
+      });
+    }
   }
 
   /**
