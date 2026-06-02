@@ -34,7 +34,14 @@ export function TaskPanel({ onSelect }: { onSelect: (id: string) => void }) {
     <div className="card">
       <h2>Tasks</h2>
       {tasks.map((t) => (
-        <div key={t.id} className="task-row" onClick={() => onSelect(t.id)}>
+        <div
+          key={t.id}
+          className="task-row"
+          role="button"
+          tabIndex={0}
+          onClick={() => onSelect(t.id)}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(t.id); } }}
+        >
           <span className={`badge ${t.origin}`}>{t.origin === 'user' ? 'You' : 'System'}</span>
           <span className={`badge ${t.status}`}>{t.status}</span>
           <span className="prompt">{t.prompt}</span>

@@ -116,8 +116,8 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
       {p.implementation.diff.length > 0 && (
         <div className="card">
           <h2>Changes ({p.implementation.diff.length} files)</h2>
-          {p.implementation.diff.map((d, i) => (
-            <div key={i} style={{ marginBottom: 12 }}>
+          {p.implementation.diff.map((d) => (
+            <div key={d.path} style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 13, marginBottom: 4 }}>
                 <strong>{d.path}</strong>
                 <span style={{ color: 'var(--green)', marginLeft: 8 }}>+{d.additions}</span>
@@ -148,14 +148,14 @@ export function TaskDetail({ taskId, onBack }: { taskId: string; onBack: () => v
       )}
 
       {/* Reviews */}
-      {p.reviews.map((r, i) => (
-        <div className="card" key={i}>
+      {p.reviews.map((r) => (
+        <div className="card" key={r.reviewer}>
           <h2>Review by {r.reviewer}</h2>
           <span className={`badge ${r.verdict}`}>{r.verdict}</span>
           {r.concerns.length > 0 && (
             <div style={{ marginTop: 8 }}>
-              {r.concerns.map((c, j) => (
-                <div key={j} className={`concern-row ${c.severity}`}>
+              {r.concerns.map((c) => (
+                <div key={`${c.file}:${c.line ?? 0}:${c.category}`} className={`concern-row ${c.severity}`}>
                   <strong>{c.file}{c.line ? `:${c.line}` : ''}</strong>
                   <span style={{ marginLeft: 8 }}>[{c.category}]</span>
                   <div>{c.message}</div>

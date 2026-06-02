@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useApi } from '../hooks/useApi';
-import { useWebSocket } from '../hooks/useWebSocket';
+import { useWebSocketContext, type WsMsgDialogStream } from '../contexts/WebSocketContext';
 
 interface Message {
   id: string;
@@ -15,7 +15,7 @@ export function DialogChat() {
   const [loading, setLoading] = useState(false);
   const [streamChunks, setStreamChunks] = useState('');
   const api = useApi();
-  const { lastMessage } = useWebSocket();
+  const { subscribe } = useWebSocketContext();
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Load history on mount
@@ -25,12 +25,13 @@ export function DialogChat() {
 
   // Stream chunks from WebSocket
   useEffect(() => {
-    if (!lastMessage || typeof lastMessage !== 'object') return;
-    const msg = lastMessage as any;
-    if (msg.type === 'dialog_stream') {
-      setStreamChunks((prev) => prev + msg.payload.chunk);
-    }
-  }, [lastMessage]);
+    const unsub = subscribe((msg) => {
+      if (msg.type !== 'dialog_stream') return;
+      const m = msg as WsMsgDialogStream;
+      setStreamChunks((prev) => prev + m.payload.chunk);
+    });
+    return unsub;
+  }, [subscribe]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -66,6 +67,13 @@ export function DialogChat() {
     } finally {
       setLoading(false);
       setStreamChunks('');
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Guard against IME composition — don't submit while composing (e.g. Chinese input)
+    if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+      submit();
     }
   };
 
@@ -138,7 +146,7 @@ export function DialogChat() {
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && submit()}
+            onKeyDown={handleKeyDown}
             placeholder="Ask about your project..."
             disabled={loading}
           />

@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
-import { useWebSocket } from '../hooks/useWebSocket';
+import { useWebSocketContext, type WsMsgAgentOutput } from '../contexts/WebSocketContext';
 
 interface OutputLine {
+  id: string;
   text: string;
   stream: 'stdout' | 'stderr';
   provider: string;
@@ -9,32 +10,38 @@ interface OutputLine {
   time: string;
 }
 
+let lineSeq = 0;
+
 export function AgentTerminal({ taskId }: { taskId: string }) {
   const [lines, setLines] = useState<OutputLine[]>([]);
-  const { lastMessage } = useWebSocket();
+  const { subscribe } = useWebSocketContext();
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!lastMessage || typeof lastMessage !== 'object') return;
-    const msg = lastMessage as any;
-    if (msg.type !== 'agent_output') return;
-    if (msg.payload?.task_id !== taskId) return;
+    const unsub = subscribe((msg) => {
+      if (msg.type !== 'agent_output') return;
+      const m = msg as WsMsgAgentOutput;
+      if (m.payload.task_id !== taskId) return;
 
-    const chunk = msg.payload.chunk as string;
-    // Split into lines for better display
-    const newLines = chunk.split('\n').filter((l: string) => l.length > 0).map((text: string) => ({
-      text,
-      stream: msg.payload.stream as 'stdout' | 'stderr',
-      provider: msg.payload.provider as string,
-      stage: msg.payload.stage as string,
-      time: new Date().toLocaleTimeString(),
-    }));
+      const newLines = m.payload.chunk
+        .split('\n')
+        .filter((l) => l.length > 0)
+        .map((text) => ({
+          id: `line-${++lineSeq}`,
+          text,
+          stream: m.payload.stream,
+          provider: m.payload.provider,
+          stage: m.payload.stage,
+          time: new Date().toLocaleTimeString(),
+        }));
 
-    if (newLines.length > 0) {
-      setLines((prev) => [...prev, ...newLines].slice(-500));
-    }
-  }, [lastMessage, taskId]);
+      if (newLines.length > 0) {
+        setLines((prev) => [...prev, ...newLines].slice(-500));
+      }
+    });
+    return unsub;
+  }, [subscribe, taskId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -83,8 +90,8 @@ export function AgentTerminal({ taskId }: { taskId: string }) {
             <span style={{ color: 'var(--yellow)' }}>$</span> Waiting for agent to start...
           </div>
         )}
-        {lines.map((line, i) => (
-          <div key={i} style={{
+        {lines.map((line) => (
+          <div key={line.id} style={{
             color: line.stream === 'stderr' ? 'var(--yellow)' : '#c8ccd4',
             wordBreak: 'break-all',
           }}>

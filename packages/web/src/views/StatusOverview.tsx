@@ -98,8 +98,8 @@ export function StatusOverview() {
       {context && context.snapshot.recent_commits.length > 0 && (
         <div className="card">
           <h2>Recent Commits</h2>
-          {context.snapshot.recent_commits.slice(0, 10).map((c, i) => (
-            <div key={i} style={{ padding: '4px 0', fontSize: 13, borderBottom: '1px solid var(--border)' }}>
+          {context.snapshot.recent_commits.slice(0, 10).map((c) => (
+            <div key={c.hash} style={{ padding: '4px 0', fontSize: 13, borderBottom: '1px solid var(--border)' }}>
               <code style={{ color: 'var(--accent)', marginRight: 8 }}>{c.hash.slice(0, 7)}</code>
               {c.message}
             </div>

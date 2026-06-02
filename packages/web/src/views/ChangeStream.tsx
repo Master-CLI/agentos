@@ -1,27 +1,33 @@
 import { useState, useEffect, useRef } from 'react';
-import { useWebSocket } from '../hooks/useWebSocket';
+import { useWebSocketContext, type WsMessage } from '../contexts/WebSocketContext';
 
-interface Event {
-  id?: string;
+interface EventRow {
+  key: string; // stable key: prefer event id, fall back to monotonic seq
   type: string;
   source?: string;
   timestamp?: string;
   payload?: Record<string, unknown>;
 }
 
+let eventSeq = 0;
+
 export function ChangeStream() {
-  const [events, setEvents] = useState<Event[]>([]);
-  const { lastMessage } = useWebSocket();
+  const [events, setEvents] = useState<EventRow[]>([]);
+  const { subscribe } = useWebSocketContext();
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (lastMessage && typeof lastMessage === 'object' && (lastMessage as Event).type !== 'connected') {
+    const unsub = subscribe((msg: WsMessage) => {
+      if (msg.type === 'connected') return;
+      const e = msg as { type: string; id?: string; source?: string; timestamp?: string; payload?: Record<string, unknown> };
+      const key = e.id ?? `seq-${++eventSeq}`;
       setEvents((prev) => {
-        const next = [...prev, lastMessage as Event];
-        return next.slice(-100); // Keep last 100
+        const next = [...prev, { key, type: e.type, source: e.source, timestamp: e.timestamp, payload: e.payload }];
+        return next.slice(-100);
       });
-    }
-  }, [lastMessage]);
+    });
+    return unsub;
+  }, [subscribe]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -42,8 +48,8 @@ export function ChangeStream() {
     <div className="card">
       <h2>Event Stream ({events.length})</h2>
       <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
-        {events.map((e, i) => (
-          <div key={i} className="event-row">
+        {events.map((e) => (
+          <div key={e.key} className="event-row">
             <span className="time">
               {e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '—'}
             </span>
