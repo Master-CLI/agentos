@@ -16,7 +16,7 @@ export interface ConfigRefreshOptions {
  *
  * Real-world drift this fixes:
  *   - `project.path` written at init can point at an old directory if the
- *     repo was moved/renamed (observed: FastPipe → PipeBuilder).
+ *     repo was moved/renamed.
  *   - `git_commit_count` is frozen at init time (observed: stuck at 68 while
  *     the repo accumulated many more commits).
  *

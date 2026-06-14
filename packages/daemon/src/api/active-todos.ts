@@ -53,8 +53,8 @@ const TASK_KEEP_STATUSES = new Set(['active', 'draft', 'in_progress', 'in-progre
  * Reproduces Claude Code's per-project memory directory naming:
  * absolute project path with `:`, `\`, and `/` replaced by `-`.
  *
- * Example: `C:\Users\Shado\Downloads\T2\PipeBuilder`
- *       →  `~/.claude/projects/C--Users-Shado-Downloads-T2-PipeBuilder/memory`
+ * Example: `C:\Users\<username>\projects\my-app`
+ *       →  `~/.claude/projects/C--Users-<username>-projects-my-app/memory`
  *
  * Returns null if the resulting directory doesn't exist.
  */
@@ -233,11 +233,11 @@ async function scanGit(projectDir: string, errors: string[]): Promise<GitSummary
 
 /**
  * Looks for a top-level CHANGELOG.md and reports whether the `[Unreleased]`
- * section has any bullets (or any non-heading content). This is the canonical
- * pre-release readiness signal in the PipeBuilder workflow.
+ * section has any bullets (or any non-heading content). This is a common
+ * pre-release readiness signal.
  */
 async function scanChangelog(projectDir: string, errors: string[]): Promise<ChangelogSummary | null> {
-  // Standard locations: project root, then `web/` (PipeBuilder convention).
+  // Standard locations: project root, then `web/`.
   const candidates = [
     path.join(projectDir, 'CHANGELOG.md'),
     path.join(projectDir, 'web', 'CHANGELOG.md'),
